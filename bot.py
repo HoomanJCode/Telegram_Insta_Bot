@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Instagram Downloader Telegram Bot
-Async file server with aiohttp, non-blocking downloads via thread pool
+Downloads Instagram content and uploads directly to Telegram
 Supports posts, reels, stories, IGTV, and profile pictures
 """
 
@@ -18,7 +18,6 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
-from urllib.parse import quote
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,7 +27,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 import yt_dlp
 from yt_dlp.utils import DownloadError
-from aiohttp import web
 
 from config import Config
 
@@ -65,97 +63,6 @@ INSTAGRAM_RE = re.compile(
     r')'
 )
 
-# Extract media ID from various Instagram URL types
-MEDIA_ID_RE = re.compile(r'instagram\.com/(?:p|reel|tv|stories)/([^/?#]+)')
-PROFILE_RE = re.compile(r'instagram\.com/([^/?#\s]+)/?$')
-
-# ---------------------------------------------------------------------------
-# aiohttp File Server (same as YouTube bot)
-# ---------------------------------------------------------------------------
-class FileServer:
-    def __init__(self, port=8000):
-        self.port = port
-        self.app = web.Application()
-        self.app.router.add_get('/{filename}', self._handle_download)
-        self.app.router.add_get('/', self._handle_index)
-        self._runner = None
-    
-    async def _handle_index(self, request):
-        files = []
-        for f in sorted(DOWNLOADS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-            if f.is_file():
-                files.append({
-                    'name': f.name,
-                    'size': f.stat().st_size,
-                    'mtime': datetime.fromtimestamp(f.stat().st_mtime).isoformat()
-                })
-        return web.json_response({'files': files[:50]})
-    
-    async def _handle_download(self, request):
-        filename = request.match_info['filename']
-        filepath = DOWNLOADS_DIR / filename
-        
-        if not filepath.exists() or not filepath.is_file():
-            raise web.HTTPNotFound()
-        
-        response = web.StreamResponse()
-        response.headers['Content-Type'] = self._get_mime(filepath.suffix)
-        response.headers['Content-Length'] = str(filepath.stat().st_size)
-        response.headers['Cache-Control'] = 'public, max-age=86400'
-        response.headers['Accept-Ranges'] = 'bytes'
-        
-        range_header = request.headers.get('Range', '')
-        if range_header.startswith('bytes='):
-            try:
-                range_str = range_header[6:]
-                start, end = range_str.split('-')
-                start = int(start) if start else 0
-                end = int(end) if end else filepath.stat().st_size - 1
-                response.set_status(206)
-                response.headers['Content-Range'] = f'bytes {start}-{end}/{filepath.stat().st_size}'
-                response.headers['Content-Length'] = str(end - start + 1)
-            except:
-                start, end = 0, filepath.stat().st_size - 1
-        else:
-            start, end = 0, filepath.stat().st_size - 1
-        
-        await response.prepare(request)
-        
-        try:
-            with open(filepath, 'rb') as f:
-                f.seek(start)
-                remaining = end - start + 1
-                chunk_size = 1024 * 1024  # 1MB chunks
-                while remaining > 0:
-                    chunk = f.read(min(chunk_size, remaining))
-                    if not chunk:
-                        break
-                    await response.write(chunk)
-                    remaining -= len(chunk)
-        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
-            pass
-        
-        return response
-    
-    def _get_mime(self, ext):
-        return {
-            '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska',
-            '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.opus': 'audio/opus',
-            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-            '.webp': 'image/webp', '.gif': 'image/gif',
-        }.get(ext.lower(), 'application/octet-stream')
-    
-    async def start(self):
-        self._runner = web.AppRunner(self.app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, '0.0.0.0', self.port)
-        await site.start()
-        logger.info("File server on port %d (aiohttp)", self.port)
-    
-    async def stop(self):
-        if self._runner:
-            await self._runner.cleanup()
-
 # ---------------------------------------------------------------------------
 # Media Record
 # ---------------------------------------------------------------------------
@@ -169,10 +76,10 @@ class MediaRecord:
         self.url = url
         self.media_id = media_id
         self.media_type = media_type
-        self.file_paths = file_paths  # List of paths (for carousels)
+        self.file_paths = file_paths
         self.total_size = total_size
         self.download_time = download_time
-        self.telegram_file_ids = telegram_file_ids or []  # List of file IDs
+        self.telegram_file_ids = telegram_file_ids or []
     
     def to_dict(self):
         return {k: getattr(self, k) for k in self.__slots__}
@@ -187,32 +94,17 @@ class MediaRecord:
 class InstagramDownloaderBot:
     def __init__(self):
         self.config = Config()
-        self.base_url = self.config.BASE_DOWNLOAD_LINK.rstrip('/')
-        try: 
-            port = int(self.base_url.split(':')[-1]) if ':' in self.base_url.split('/')[2] else 8000
-        except: 
-            port = 8000
         
         for d in (DATA_DIR, COOKIES_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
         
         self.cookies: Dict[int, Path] = {}
         self.media: Dict[int, List[MediaRecord]] = {}
-        self._pending_urls: Dict[int, Tuple[str, str, str, str]] = {}  # uid -> (url, media_id, media_type, title)
+        self._pending_urls: Dict[int, Tuple[str, str, str, str]] = {}
         self._download_tasks: Dict[int, asyncio.Task] = {}
-        
-        self.has_ffmpeg = self._check_ffmpeg()
-        self.file_server = FileServer(port=port)
         
         self._load()
         self._start_cleanup()
-    
-    def _check_ffmpeg(self):
-        try:
-            subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-            return True
-        except:
-            return False
     
     def _load(self):
         for name, fn, attr in [
@@ -281,36 +173,25 @@ class InstagramDownloaderBot:
         return None
     
     def _parse_instagram_url(self, url: str) -> Tuple[str, str]:
-        """Parse Instagram URL and return (media_type, media_id)"""
-        # Post: instagram.com/p/CODE/
         if '/p/' in url:
             m = re.search(r'/p/([^/?#]+)', url)
             return ('post', m.group(1) if m else '')
-        
-        # Reel: instagram.com/reel/CODE/
         elif '/reel/' in url:
             m = re.search(r'/reel/([^/?#]+)', url)
             return ('reel', m.group(1) if m else '')
-        
-        # IGTV: instagram.com/tv/CODE/
         elif '/tv/' in url:
             m = re.search(r'/tv/([^/?#]+)', url)
             return ('tv', m.group(1) if m else '')
-        
-        # Story: instagram.com/stories/USERNAME/STORY_ID/
         elif '/stories/' in url:
             m = re.search(r'/stories/([^/?#]+)', url)
             username = m.group(1) if m else 'unknown'
             story_id = re.search(r'/stories/[^/]+/(\d+)', url)
             return ('story', story_id.group(1) if story_id else username)
-        
-        # Profile: instagram.com/USERNAME/
         else:
             m = re.search(r'instagram\.com/([^/?#\s]+)', url)
             return ('profile', m.group(1) if m else 'unknown')
     
     def _get_existing_types(self, uid, media_id):
-        """Get already downloaded format types for a media ID"""
         types = set()
         for m in self.media.get(uid, []):
             if m.media_id == media_id and any(Path(fp).exists() for fp in m.file_paths):
@@ -318,7 +199,6 @@ class InstagramDownloaderBot:
         return types
     
     def _find_existing(self, uid, media_id, media_type):
-        """Find existing download record"""
         for m in self.media.get(uid, []):
             if m.media_id == media_id and m.media_type == media_type:
                 if any(Path(fp).exists() for fp in m.file_paths):
@@ -342,65 +222,54 @@ class InstagramDownloaderBot:
         ])
     
     def _format_choice_keyboard(self, uid, media_type, media_id):
-        """Build format selection keyboard based on media type"""
         existing = self._get_existing_types(uid, media_id)
         kb = []
         
         if media_type == 'post':
-            # Posts can have images (single/carousel) and sometimes video
             img_label = "🖼️ Post Images"
             if 'post_image' in existing:
-                img_label = "✅ 🖼️ Post Images - Downloaded"
+                img_label = "✅ 🖼️ Post Images"
             kb.append([InlineKeyboardButton(img_label, callback_data='fmt_post_image')])
             
             vid_label = "🎬 Post Video"
             if 'post_video' in existing:
-                vid_label = "✅ 🎬 Post Video - Downloaded"
+                vid_label = "✅ 🎬 Post Video"
             kb.append([InlineKeyboardButton(vid_label, callback_data='fmt_post_video')])
         
         elif media_type == 'reel':
             label = "🎬 Reel Video"
             if 'reel_video' in existing:
-                label = "✅ 🎬 Reel Video - Downloaded"
+                label = "✅ 🎬 Reel Video"
             kb.append([InlineKeyboardButton(label, callback_data='fmt_reel_video')])
         
         elif media_type == 'tv':
             label = "📺 IGTV Video"
             if 'tv_video' in existing:
-                label = "✅ 📺 IGTV Video - Downloaded"
+                label = "✅ 📺 IGTV Video"
             kb.append([InlineKeyboardButton(label, callback_data='fmt_tv_video')])
         
         elif media_type == 'story':
             img_label = "📸 Story Image"
             if 'story_image' in existing:
-                img_label = "✅ 📸 Story Image - Downloaded"
+                img_label = "✅ 📸 Story Image"
             kb.append([InlineKeyboardButton(img_label, callback_data='fmt_story_image')])
             
             vid_label = "🎥 Story Video"
             if 'story_video' in existing:
-                vid_label = "✅ 🎥 Story Video - Downloaded"
+                vid_label = "✅ 🎥 Story Video"
             kb.append([InlineKeyboardButton(vid_label, callback_data='fmt_story_video')])
         
         elif media_type == 'profile':
             label = "🖼️ Profile Picture"
             if 'profile_pic' in existing:
-                label = "✅ 🖼️ Profile Picture - Downloaded"
+                label = "✅ 🖼️ Profile Picture"
             kb.append([InlineKeyboardButton(label, callback_data='fmt_profile_pic')])
         
         kb.append([InlineKeyboardButton("🔙 Cancel", callback_data='b')])
         return InlineKeyboardMarkup(kb)
     
-    def _delivery_keyboard(self, uid, idx=None):
-        idx_str = str(idx) if idx is not None else 'new'
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 Send via Telegram", callback_data=f'tg_{idx_str}')],
-            [InlineKeyboardButton("📋 Get Download Link", callback_data=f'lk_{idx_str}')],
-            [InlineKeyboardButton("🔙 Back to formats", callback_data=f'backfmt_{idx_str}')],
-        ])
-    
     # --- Sync helpers (run in executor) ---
     def _sync_fetch_info(self, uid, url):
-        """Fetch media info without downloading"""
         opts = {
             'cookiefile': str(self.cookies[uid]),
             'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3,
@@ -410,39 +279,33 @@ class InstagramDownloaderBot:
             return ydl.extract_info(url, download=False)
     
     def _sync_download(self, uid, url, media_type):
-        """Download Instagram media - returns list of file paths"""
         base_opts = {
             'cookiefile': str(self.cookies[uid]),
             'quiet': True, 'no_warnings': True,
             'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
             'no_mtime': True,
-            # Instagram requires realistic user-agent
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         }
         
-        # Configure format and output template based on media type
         if 'video' in media_type or 'reel' in media_type or 'tv' in media_type:
-            # Video formats
             opts = {**base_opts, 
                     'format': 'best[ext=mp4]/best',
                     'outtmpl': str(DOWNLOADS_DIR / '%(id)s_%(format_id)s.%(ext)s'),
                     'merge_output_format': 'mp4'}
         elif 'profile_pic' in media_type:
-            # Profile picture only
             opts = {**base_opts,
                     'playlist_items': '0',
                     'skip_download': True,
                     'writethumbnail': True,
                     'outtmpl': str(DOWNLOADS_DIR / '%(id)s_profile.%(ext)s')}
         else:
-            # Images (posts, stories)
             opts = {**base_opts,
                     'format': 'best',
                     'outtmpl': str(DOWNLOADS_DIR / '%(id)s_%(format_id)s.%(ext)s')}
         
-        # Add rate limiting delay between requests
+        # Rate limiting delay
         import random
-        time.sleep(random.uniform(1, 3))  # Random delay to avoid rate limits
+        time.sleep(random.uniform(1, 3))
         
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -452,18 +315,15 @@ class InstagramDownloaderBot:
                 
                 downloaded_files = []
                 
-                # Handle carousel posts (multiple images)
                 entries = info.get('entries') or [info]
                 for entry in entries:
                     if entry is None:
                         continue
-                    # Check requested_downloads for actual downloaded files
                     for rd in entry.get('requested_downloads', []):
                         fp = rd.get('filepath')
                         if fp and Path(fp).exists():
                             downloaded_files.append(fp)
                     
-                    # Fallback: check for files by ID pattern
                     if not entry.get('requested_downloads'):
                         for ext in ('.jpg', '.jpeg', '.png', '.webp', '.mp4', '.webm'):
                             pattern = f'{vid}*{ext}'
@@ -587,7 +447,6 @@ class InstagramDownloaderBot:
         
         url, media_id, media_type, title = self._pending_urls[uid]
         
-        # Map format keys to download types
         format_map = {
             'fmt_post_image': 'post_image',
             'fmt_post_video': 'post_video',
@@ -602,21 +461,24 @@ class InstagramDownloaderBot:
         if not download_type:
             return
         
-        # Check for existing download
+        # Check for existing download and resend if found
         existing = self._find_existing(uid, media_id, download_type)
-        if existing:
-            await q.answer("Already downloaded!")
-            idx = self.media[uid].index(existing)
-            await self._show_delivery(q.message, existing, idx)
+        if existing and existing.telegram_file_ids:
+            await q.answer("Resending...")
+            await self._resend_media(q.message, existing)
+            return
+        elif existing:
+            await q.answer("Already downloaded! Uploading...")
+            await self._upload_media(q.message, existing)
             return
         
-        # Start background download task
-        await q.message.edit_text(f"⏳ Downloading {download_type}...\nThis may take a moment.")
-        task = asyncio.create_task(self._download_task(uid, url, q.message, download_type, title))
+        # Start background download
+        await q.message.edit_text(f"⏳ Downloading {download_type}...")
+        task = asyncio.create_task(self._download_and_upload(uid, url, q.message, download_type, title))
         self._download_tasks[uid] = task
     
-    async def _download_task(self, uid, url, msg, download_type, title):
-        """Background download task"""
+    async def _download_and_upload(self, uid, url, msg, download_type, title):
+        """Download media and upload directly to Telegram"""
         try:
             file_paths, dl_title, media_id = await asyncio.get_event_loop().run_in_executor(
                 None, self._sync_download, uid, url, download_type)
@@ -633,14 +495,16 @@ class InstagramDownloaderBot:
             )
             
             self.media.setdefault(uid, []).insert(0, record)
-            # Keep only last 50 records
             while len(self.media[uid]) > 50:
                 old = self.media[uid].pop()
                 for fp in old.file_paths:
                     Path(fp).unlink(missing_ok=True)
             self._save()
             
-            await self._show_delivery(msg, record, 0)
+            # Upload to Telegram immediately
+            await msg.edit_text(f"📤 Uploading to Telegram...")
+            await self._upload_media(msg, record)
+            
         except Exception as e:
             logger.error("Download error for uid %d: %s", uid, str(e)[:100])
             await msg.edit_text(
@@ -654,145 +518,87 @@ class InstagramDownloaderBot:
         finally:
             self._download_tasks.pop(uid, None)
     
-    async def _back_to_formats(self, u, c):
-        q = u.callback_query
-        await q.answer()
-        uid = u.effective_user.id
-        data = q.data
-        
-        idx = 0 if 'new' in data else int(data.split('_')[1])
-        records = self.media.get(uid, [])
-        if idx >= len(records):
-            return
-        
-        record = records[idx]
-        media_type, _ = self._parse_instagram_url(record.url)
-        self._pending_urls[uid] = (record.url, record.media_id, media_type, record.title)
-        
-        await q.message.edit_text(
-            "Choose format to download:",
-            reply_markup=self._format_choice_keyboard(uid, media_type, record.media_id))
-    
-    async def _show_delivery(self, msg, record, idx):
-        """Show delivery options after download"""
-        mb = record.total_size / 1024 / 1024
-        
-        type_labels = {
-            'post_image': '🖼️ Post Images',
-            'post_video': '🎬 Post Video',
-            'reel_video': '🎬 Reel',
-            'tv_video': '📺 IGTV',
-            'story_image': '📸 Story Image',
-            'story_video': '🎥 Story Video',
-            'profile_pic': '🖼️ Profile Pic',
-        }
-        
-        file_count = len(record.file_paths)
-        count_str = f" ({file_count} files)" if file_count > 1 else ""
-        
-        await msg.edit_text(
-            f"{type_labels.get(record.media_type, '📱')} *{self._esc(record.title[:200])}*\n"
-            f"📦 {mb:.2f} MB{count_str} | {record.media_type}\n"
-            f"🕒 {record.download_time}\n\n"
-            f"Choose delivery method:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self._delivery_keyboard(msg.chat.id, idx))
-    
-    async def _send_telegram(self, u, c):
-        q = u.callback_query
-        await q.answer()
-        uid = u.effective_user.id
-        data = q.data
-        
-        idx = 0 if 'new' in data else int(data.split('_')[1])
-        records = self.media.get(uid, [])
-        if idx >= len(records):
-            return
-        
-        record = records[idx]
-        
-        # Check if files exist
+    async def _upload_media(self, msg, record):
+        """Upload media files to Telegram"""
         existing_files = [fp for fp in record.file_paths if Path(fp).exists()]
         if not existing_files:
-            await q.message.reply_text("❌ Files have been deleted.")
+            await msg.edit_text("❌ Files deleted.", reply_markup=self._menu(msg.chat.id))
             return
         
-        # Check total size
         total_mb = sum(Path(fp).stat().st_size for fp in existing_files) / 1024 / 1024
         if total_mb > self.config.MAX_TELEGRAM_FILE_SIZE:
-            await q.message.reply_text(
-                f"⚠️ Total size too large ({total_mb:.1f}MB).\n"
-                f"Use download link instead.")
+            await msg.edit_text(
+                f"⚠️ File too large ({total_mb:.1f}MB). Max: {self.config.MAX_TELEGRAM_FILE_SIZE}MB",
+                reply_markup=self._menu(msg.chat.id))
             return
         
-        s = await q.message.reply_text("📤 Uploading to Telegram...")
         try:
             sent_ids = []
-            for fp in existing_files:
+            for i, fp in enumerate(existing_files):
                 ext = Path(fp).suffix.lower()
                 is_video = ext in ('.mp4', '.webm', '.mkv')
                 is_image = ext in ('.jpg', '.jpeg', '.png', '.webp')
                 
+                file_count = len(existing_files)
+                caption = f"{record.title[:200]}"
+                if file_count > 1:
+                    caption += f" ({i+1}/{file_count})"
+                
                 with open(fp, 'rb') as f:
                     if is_video:
-                        sent = await q.message.reply_video(
+                        sent = await msg.reply_video(
                             video=f, 
-                            caption=f"{record.title[:200]}",
+                            caption=caption,
                             supports_streaming=True)
                         sent_ids.append(sent.video.file_id)
                     elif is_image:
-                        sent = await q.message.reply_photo(
+                        sent = await msg.reply_photo(
                             photo=f,
-                            caption=f"{record.title[:200]}")
+                            caption=caption)
                         sent_ids.append(sent.photo[-1].file_id)
                     else:
-                        sent = await q.message.reply_document(
+                        sent = await msg.reply_document(
                             document=f,
-                            caption=f"{record.title[:200]}")
+                            caption=caption)
                         sent_ids.append(sent.document.file_id)
                 
-                # Small delay between multiple uploads
-                if len(existing_files) > 1:
+                if file_count > 1:
                     await asyncio.sleep(0.5)
             
             record.telegram_file_ids = sent_ids
             self._save()
-            await s.delete()
-            await q.message.delete()
+            await msg.delete()
+            
+            # Cleanup files after successful upload
+            for fp in record.file_paths:
+                Path(fp).unlink(missing_ok=True)
+                
         except Exception as e:
             logger.error("Upload error: %s", str(e)[:100])
-            await s.edit_text("❌ Upload failed. Try download link instead.")
+            await msg.edit_text(
+                "❌ Upload failed. Try again.",
+                reply_markup=self._menu(msg.chat.id))
     
-    async def _send_link(self, u, c):
-        q = u.callback_query
-        await q.answer()
-        uid = u.effective_user.id
-        data = q.data
-        
-        idx = 0 if 'new' in data else int(data.split('_')[1])
-        records = self.media.get(uid, [])
-        if idx >= len(records):
+    async def _resend_media(self, msg, record):
+        """Resend media using cached file IDs"""
+        if not record.telegram_file_ids:
+            await self._upload_media(msg, record)
             return
         
-        record = records[idx]
-        existing_files = [fp for fp in record.file_paths if Path(fp).exists()]
-        
-        if not existing_files:
-            await q.message.reply_text("❌ Files have been deleted.")
-            return
-        
-        links = []
-        for fp in existing_files:
-            url = f"{self.base_url}/{quote(Path(fp).name)}"
-            links.append(f"📥 `{url}`")
-        
-        await q.message.edit_text(
-            "📋 *Download Links*\n\n" + "\n".join(links) + 
-            f"\n\n⚠️ Links expire after {self.config.STORAGE_DAYS} days.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Menu", callback_data='b')
-            ]]))
+        try:
+            for file_id in record.telegram_file_ids:
+                try:
+                    await msg.reply_video(video=file_id, caption=record.title[:200], supports_streaming=True)
+                except:
+                    try:
+                        await msg.reply_photo(photo=file_id, caption=record.title[:200])
+                    except:
+                        await msg.reply_document(document=file_id, caption=record.title[:200])
+                await asyncio.sleep(0.3)
+            await msg.delete()
+        except Exception as e:
+            logger.error("Resend error: %s", str(e)[:100])
+            await self._upload_media(msg, record)
     
     async def _show_recent(self, u, c, page=0):
         uid = u.effective_user.id
@@ -820,7 +626,7 @@ class InstagramDownloaderBot:
         
         txt = f"📱 *Recent Downloads* ({page + 1}/{tp})\n\n"
         for i, m in enumerate(pv, page * pp + 1):
-            ex = "✅" if any(Path(fp).exists() for fp in m.file_paths) else "🗑️"
+            ex = "✅" if m.telegram_file_ids else "💾"
             em = type_emoji.get(m.media_type, '📱')
             file_count = len(m.file_paths)
             count_str = f" ({file_count} files)" if file_count > 1 else ""
@@ -829,11 +635,11 @@ class InstagramDownloaderBot:
         
         kb = []
         for i, m in enumerate(pv, page * pp + 1):
-            if any(Path(fp).exists() for fp in m.file_paths):
-                em = type_emoji.get(m.media_type, '📱')
+            em = type_emoji.get(m.media_type, '📱')
+            if m.telegram_file_ids:
                 kb.append([InlineKeyboardButton(
-                    f"{em} {i}. {m.title[:40]}",
-                    callback_data=f'sel_{page * pp + (i - page * pp - 1)}')])
+                    f"📤 Resend {em} {i}. {m.title[:35]}",
+                    callback_data=f'resend_{page * pp + (i - page * pp - 1)}')])
         
         nav = []
         if page > 0:
@@ -842,7 +648,8 @@ class InstagramDownloaderBot:
             nav.append(InlineKeyboardButton("➡️", callback_data=f'p_{page + 1}'))
         if nav:
             kb.append(nav)
-        kb.append([InlineKeyboardButton("🔙 Menu", callback_data='b')])
+        kb.append([InlineKeyboardButton("🗑️ Clear History", callback_data='clear_hist'),
+                   InlineKeyboardButton("🔙 Menu", callback_data='b')])
         
         await msg.reply_text(
             txt, 
@@ -850,31 +657,27 @@ class InstagramDownloaderBot:
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(kb))
     
-    async def _select_media(self, u, c):
+    async def _resend_from_history(self, u, c):
         q = u.callback_query
-        await q.answer()
+        await q.answer("Resending...")
         uid, idx = u.effective_user.id, int(q.data.split('_')[1])
         media_list = self.media.get(uid, [])
         if 0 <= idx < len(media_list):
-            await self._show_delivery(q.message, media_list[idx], idx)
+            await self._resend_media(q.message, media_list[idx])
+            await q.message.delete()
     
-    async def _delete_media(self, u, c):
+    async def _clear_history(self, u, c):
         q = u.callback_query
         await q.answer()
-        uid, idx = u.effective_user.id, int(q.data.split('_')[1])
-        media_list = self.media.get(uid, [])
-        if 0 <= idx < len(media_list):
-            record = media_list[idx]
-            for fp in record.file_paths:
-                Path(fp).unlink(missing_ok=True)
-            media_list.pop(idx)
+        uid = u.effective_user.id
+        if uid in self.media:
+            del self.media[uid]
             self._save()
-            await q.message.reply_text(
-                "🗑️ Deleted.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📱 Recent", callback_data='r'),
-                    InlineKeyboardButton("🔙 Menu", callback_data='b')
-                ]]))
+        await q.message.edit_text(
+            "🗑️ History cleared.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Menu", callback_data='b')
+            ]]))
     
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
@@ -934,8 +737,7 @@ class InstagramDownloaderBot:
         d, uid = q.data, u.effective_user.id
         
         routes = {
-            'b': lambda: q.message.edit_text(
-                "📋 Main Menu:", reply_markup=self._menu(uid)),
+            'b': lambda: q.message.edit_text("📋 Main Menu:", reply_markup=self._menu(uid)),
             'r': lambda: self._show_recent(u, c),
             'c': lambda: self._ask_cookies(u, c),
             'cs': lambda: q.message.edit_text(
@@ -944,28 +746,17 @@ class InstagramDownloaderBot:
             'vc': lambda: q.message.edit_text(
                 f"📦 {len(self.media.get(uid, []))} downloaded items",
                 reply_markup=self._menu(uid)),
+            'clear_hist': lambda: self._clear_history(u, c),
         }
         
         if d in routes:
             await routes[d]()
         elif d.startswith('fmt_'):
             await self._choose_format(u, c)
-        elif d.startswith('backfmt_'):
-            await self._back_to_formats(u, c)
-        elif d.startswith('tg_'):
-            await self._send_telegram(u, c)
-        elif d.startswith('lk_'):
-            await self._send_link(u, c)
-        elif d.startswith('sel_'):
-            await self._select_media(u, c)
-        elif d.startswith('d_'):
-            await self._delete_media(u, c)
+        elif d.startswith('resend_'):
+            await self._resend_from_history(u, c)
         elif d.startswith('p_'):
             await self._show_recent(u, c, int(d.split('_')[1]))
-    
-    # --- Run ---
-    async def _start_file_server(self):
-        await self.file_server.start()
     
     def run(self):
         app = Application.builder().token(self.config.BOT_TOKEN).build()
@@ -992,11 +783,7 @@ class InstagramDownloaderBot:
         app.add_handler(CallbackQueryHandler(self._router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
         
-        # Start file server alongside bot
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._start_file_server())
-        
-        logger.info("Instagram Bot starting with aiohttp file server...")
+        logger.info("Instagram Bot starting...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
