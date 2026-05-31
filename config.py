@@ -7,7 +7,6 @@ load_dotenv()
 class Config:
     def __init__(self):
         self.BOT_TOKEN = os.getenv('BOT_TOKEN', '')
-        self.BASE_DOWNLOAD_LINK = os.getenv('BASE_DOWNLOAD_LINK', 'http://localhost:8000')
         self._whitelist = os.getenv('WHITELIST_USERS', '')
         self.STORAGE_DAYS = int(os.getenv('STORAGE_DAYS', '2'))
         self.MAX_TELEGRAM_FILE_SIZE = int(os.getenv('MAX_TELEGRAM_FILE_SIZE', '50')) * 1024 * 1024
