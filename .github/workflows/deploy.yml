@@ -37,13 +37,12 @@ jobs:
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
         run: |
-          # Create deploy script
           cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
           #!/bin/bash
           set -e
           
-          PROJECT_DIR="/opt/InstagramYtBot"
-          SERVICE_NAME="instagramytbot"
+          PROJECT_DIR="PROJECT_DIR_PLACEHOLDER"
+          SERVICE_NAME="SERVICE_NAME_PLACEHOLDER"
           
           echo "========================================"
           echo "  InstagramYtBot Deployment"
@@ -57,39 +56,35 @@ jobs:
           
           echo "📦 Installing dependencies..."
           apt-get update -qq
-          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg git
-          
-          # Use SSH URL instead of HTTPS for git operations
-          GIT_URL=$(git remote get-url origin)
-          if [[ "$GIT_URL" == https://* ]]; then
-            # Convert HTTPS to SSH URL
-            REPO_PATH=$(echo "$GIT_URL" | sed 's|https://github.com/||')
-            GIT_URL="git@github.com:${REPO_PATH}"
-          fi
+          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git
           
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."
             cd "$PROJECT_DIR"
-            git remote set-url origin "$GIT_URL"
             git fetch origin
             git reset --hard origin/master
             git clean -fd
           else
             echo "📥 Cloning repository..."
             rm -rf "$PROJECT_DIR"
-            git clone --branch master "$GIT_URL" "$PROJECT_DIR"
+            git clone --branch master https://github.com/HoomanJCode/Telegram_Insta_Bot.git "$PROJECT_DIR"
             cd "$PROJECT_DIR"
           fi
           
           echo "⚙️  Creating .env..."
-          cat > "$PROJECT_DIR/.env" << ENVEOF
-          BOT_TOKEN=${BOT_TOKEN}
-          BASE_DOWNLOAD_LINK=${BASE_URL}
-          WHITELIST_USERS=${WHITELIST_USERS}
-          STORAGE_DAYS=${STORAGE_DAYS}
-          MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
-          ENVEOF
+          cat > "$PROJECT_DIR/.env" << EOF
+          BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
+          BASE_DOWNLOAD_LINK=BASE_URL_PLACEHOLDER
+          WHITELIST_USERS=WHITELIST_USERS_PLACEHOLDER
+          STORAGE_DAYS=STORAGE_DAYS_PLACEHOLDER
+          MAX_TELEGRAM_FILE_SIZE=MAX_TELEGRAM_SIZE_PLACEHOLDER
+          EOF
           chmod 600 "$PROJECT_DIR/.env"
+          
+          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env" 2>/dev/null; then
+            echo "❌ ERROR: BOT_TOKEN is empty!"
+            exit 1
+          fi
           
           echo "🐍 Setting up Python..."
           cd "$PROJECT_DIR"
@@ -97,6 +92,7 @@ jobs:
           python3 -m venv venv
           $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
           $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
+          $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp -q
           
           mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
           mkdir -p /var/log/$SERVICE_NAME
@@ -121,12 +117,7 @@ jobs:
           Type=simple
           User=root
           WorkingDirectory=$PROJECT_DIR
-          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
-          Environment=BOT_TOKEN=${BOT_TOKEN}
-          Environment=BASE_DOWNLOAD_LINK=${BASE_URL}
-          Environment=WHITELIST_USERS=${WHITELIST_USERS}
-          Environment=STORAGE_DAYS=${STORAGE_DAYS}
-          Environment=MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
+          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin:/root/.deno/bin
           ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
           Restart=on-failure
           RestartSec=10
@@ -159,6 +150,13 @@ jobs:
           echo "✅ Deployment Complete!"
           SCRIPTEOF
           
-          # Copy script to server and execute
+          sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
+          sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
+          sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
+          sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" /tmp/deploy_script.sh
+          sed -i "s|WHITELIST_USERS_PLACEHOLDER|${WHITELIST_USERS}|g" /tmp/deploy_script.sh
+          sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
+          sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
+          
           scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy_script.sh"
