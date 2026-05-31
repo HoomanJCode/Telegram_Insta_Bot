@@ -37,91 +37,128 @@ jobs:
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
         run: |
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
-            set -e
-            
-            PROJECT_DIR="/opt/InstagramYtBot"
-            SERVICE_NAME="instagramytbot"
-            
-            echo "========================================"
-            echo "  InstagramYtBot Deployment"
-            echo "========================================"
-            
-            if systemctl is-active --quiet $SERVICE_NAME; then
-              echo "⏹️  Stopping $SERVICE_NAME..."
-              systemctl stop $SERVICE_NAME
-              sleep 2
-            fi
-            
-            echo "📦 Installing dependencies..."
-            apt-get update -qq
-            apt-get install -y -qq python3 python3-pip python3-venv ffmpeg
-            
-            if [ -d "$PROJECT_DIR/.git" ]; then
-              echo "📥 Pulling latest code..."
-              cd "$PROJECT_DIR"
-              git fetch origin
-              git reset --hard origin/master
-              git clean -fd
-            else
-              echo "📥 Cloning repository..."
-              git clone --branch master https://github.com/YOUR_USERNAME/InstagramYtBot.git "$PROJECT_DIR"
-              cd "$PROJECT_DIR"
-            fi
-            
-            echo "🐍 Setting up Python..."
-            [ -d venv ] && rm -rf venv
-            python3 -m venv venv
-            $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
-            $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
-            
-            mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
-            mkdir -p /var/log/$SERVICE_NAME
-            
-            echo "🔧 Creating service..."
-            cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
-            [Unit]
-            Description=InstagramYtBot - Instagram Downloader
-            After=network.target
-            
-            [Service]
-            Type=simple
-            User=root
-            WorkingDirectory=$PROJECT_DIR
-            Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
-            Environment=BOT_TOKEN=${BOT_TOKEN}
-            Environment=BASE_DOWNLOAD_LINK=${BASE_URL}
-            Environment=WHITELIST_USERS=${WHITELIST_USERS}
-            Environment=STORAGE_DAYS=${STORAGE_DAYS}
-            Environment=MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
-            ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
-            Restart=on-failure
-            RestartSec=10
-            StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
-            StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
-            
-            [Install]
-            WantedBy=multi-user.target
-            SERVICEEOF
-            
-            systemctl daemon-reload
-            systemctl enable $SERVICE_NAME
-            
-            echo "▶️  Starting service..."
-            systemctl start $SERVICE_NAME
-            sleep 5
-            
-            if systemctl is-active --quiet $SERVICE_NAME; then
-              echo "✅ Service is running!"
-              systemctl status $SERVICE_NAME --no-pager -l
-            else
-              echo "❌ Service failed!"
-              echo "=== Error Log ==="
-              tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
-              echo "=== Journal ==="
-              journalctl -u $SERVICE_NAME -n 20 --no-pager || true
-              exit 1
-            fi
-            
-            echo "✅ Deployment Complete!"
-          EOF
+          # Create deploy script
+          cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
+          #!/bin/bash
+          set -e
+          
+          PROJECT_DIR="/opt/InstagramYtBot"
+          SERVICE_NAME="instagramytbot"
+          
+          echo "========================================"
+          echo "  InstagramYtBot Deployment"
+          echo "========================================"
+          
+          if systemctl is-active --quiet $SERVICE_NAME; then
+            echo "⏹️  Stopping $SERVICE_NAME..."
+            systemctl stop $SERVICE_NAME
+            sleep 2
+          fi
+          
+          echo "📦 Installing dependencies..."
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg git
+          
+          # Use SSH URL instead of HTTPS for git operations
+          GIT_URL=$(git remote get-url origin)
+          if [[ "$GIT_URL" == https://* ]]; then
+            # Convert HTTPS to SSH URL
+            REPO_PATH=$(echo "$GIT_URL" | sed 's|https://github.com/||')
+            GIT_URL="git@github.com:${REPO_PATH}"
+          fi
+          
+          if [ -d "$PROJECT_DIR/.git" ]; then
+            echo "📥 Pulling latest code..."
+            cd "$PROJECT_DIR"
+            git remote set-url origin "$GIT_URL"
+            git fetch origin
+            git reset --hard origin/master
+            git clean -fd
+          else
+            echo "📥 Cloning repository..."
+            rm -rf "$PROJECT_DIR"
+            git clone --branch master "$GIT_URL" "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
+          fi
+          
+          echo "⚙️  Creating .env..."
+          cat > "$PROJECT_DIR/.env" << ENVEOF
+          BOT_TOKEN=${BOT_TOKEN}
+          BASE_DOWNLOAD_LINK=${BASE_URL}
+          WHITELIST_USERS=${WHITELIST_USERS}
+          STORAGE_DAYS=${STORAGE_DAYS}
+          MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
+          ENVEOF
+          chmod 600 "$PROJECT_DIR/.env"
+          
+          echo "🐍 Setting up Python..."
+          cd "$PROJECT_DIR"
+          [ -d venv ] && rm -rf venv
+          python3 -m venv venv
+          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
+          $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
+          
+          mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
+          mkdir -p /var/log/$SERVICE_NAME
+          
+          echo "🧪 Testing configuration..."
+          $PROJECT_DIR/venv/bin/python -c "
+          import sys; sys.path.insert(0, '$PROJECT_DIR')
+          from config import Config
+          c = Config()
+          print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
+          print('Base URL:', c.BASE_DOWNLOAD_LINK)
+          print('Storage:', c.STORAGE_DAYS)
+          "
+          
+          echo "🔧 Creating service..."
+          cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
+          [Unit]
+          Description=InstagramYtBot - Instagram Downloader
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=$PROJECT_DIR
+          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
+          Environment=BOT_TOKEN=${BOT_TOKEN}
+          Environment=BASE_DOWNLOAD_LINK=${BASE_URL}
+          Environment=WHITELIST_USERS=${WHITELIST_USERS}
+          Environment=STORAGE_DAYS=${STORAGE_DAYS}
+          Environment=MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
+          ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
+          Restart=on-failure
+          RestartSec=10
+          StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+          StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICEEOF
+          
+          systemctl daemon-reload
+          systemctl enable $SERVICE_NAME
+          
+          echo "▶️  Starting service..."
+          systemctl start $SERVICE_NAME
+          sleep 5
+          
+          if systemctl is-active --quiet $SERVICE_NAME; then
+            echo "✅ Service is running!"
+            systemctl status $SERVICE_NAME --no-pager -l
+          else
+            echo "❌ Service failed!"
+            echo "=== Error Log ==="
+            tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
+            echo "=== Journal ==="
+            journalctl -u $SERVICE_NAME -n 20 --no-pager || true
+            exit 1
+          fi
+          
+          echo "✅ Deployment Complete!"
+          SCRIPTEOF
+          
+          # Copy script to server and execute
+          scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy_script.sh"
