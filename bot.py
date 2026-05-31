@@ -19,7 +19,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, filters, ContextTypes
@@ -61,7 +61,6 @@ INSTAGRAM_RE = re.compile(
     r')'
 )
 
-# Telegram limits
 MAX_IMAGES_PER_MEDIA_GROUP = 10
 MAX_CAPTION_LENGTH = 1024
 
@@ -91,34 +90,26 @@ class DownloadCache:
             logger.error(f"Cache save error: {e}")
     
     def is_cached(self, media_id: str) -> bool:
-        """Check if media has been downloaded and files still exist"""
         entry = self._cache.get(media_id)
         if not entry:
             return False
-        
-        # Check if files still exist
         file_paths = entry.get('file_paths', [])
         if not file_paths:
             return False
-        
         return all(Path(fp).exists() for fp in file_paths)
     
     def get_cached(self, media_id: str) -> dict:
-        """Get cached entry"""
         return self._cache.get(media_id, {})
     
     def add(self, media_id: str, entry: dict):
-        """Add to cache"""
         self._cache[media_id] = entry
         self._save()
     
     def remove(self, media_id: str):
-        """Remove from cache"""
         self._cache.pop(media_id, None)
         self._save()
     
     def cleanup_expired(self, days: int):
-        """Remove entries older than specified days"""
         cutoff = datetime.now() - timedelta(days=days)
         expired = []
         for media_id, entry in self._cache.items():
@@ -129,10 +120,8 @@ class DownloadCache:
                     expired.append(media_id)
             except ValueError:
                 expired.append(media_id)
-        
         for media_id in expired:
             self.remove(media_id)
-        
         if expired:
             logger.info(f"Cleaned {len(expired)} expired cache entries")
 
@@ -191,19 +180,13 @@ class InstagramDownloaderBot:
     
     def _cleanup(self):
         cutoff = datetime.now() - timedelta(days=self.config.STORAGE_DAYS)
-        
-        # Clean up downloaded files
         for f in DOWNLOADS_DIR.iterdir():
             if f.is_file() and datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
                 f.unlink()
                 logger.info(f"Cleaned up file: {f.name}")
-        
-        # Clean up empty directories
         for d in DOWNLOADS_DIR.iterdir():
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
-        
-        # Clean up cache
         self.cache.cleanup_expired(self.config.STORAGE_DAYS)
     
     def _cookie_path(self, uid):
@@ -238,13 +221,11 @@ class InstagramDownloaderBot:
             return ('profile', m.group(1) if m else 'unknown')
     
     def _get_download_lock(self, media_id: str) -> asyncio.Lock:
-        """Get or create a lock for this media ID to prevent concurrent downloads"""
         if media_id not in self._download_locks:
             self._download_locks[media_id] = asyncio.Lock()
         return self._download_locks[media_id]
     
     def _get_unique_download_dir(self, uid: int, media_id: str) -> Path:
-        """Get a unique download directory to prevent file conflicts"""
         timestamp = int(time.time())
         dir_name = f"{uid}_{media_id}_{timestamp}"
         return DOWNLOADS_DIR / dir_name
@@ -261,7 +242,6 @@ class InstagramDownloaderBot:
     
     # --- gallery-dl helpers ---
     def _sync_fetch_info(self, uid, url):
-        """Fetch media info using gallery-dl"""
         cookie_path = str(self.cookies[uid])
         
         try:
@@ -301,7 +281,6 @@ class InstagramDownloaderBot:
             raise
     
     def _sync_download(self, uid, url, media_id):
-        """Download Instagram media using gallery-dl"""
         cookie_path = str(self.cookies[uid])
         output_dir = self._get_unique_download_dir(uid, media_id)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -313,7 +292,6 @@ class InstagramDownloaderBot:
             if result.returncode != 0:
                 raise Exception(f"Download failed: {result.stderr[:200]}")
             
-            # Collect all downloaded files (sorted by name for consistent order)
             all_files = sorted(
                 [str(f) for f in output_dir.rglob('*') if f.is_file()],
                 key=lambda x: Path(x).name
@@ -322,13 +300,11 @@ class InstagramDownloaderBot:
             if not all_files:
                 raise Exception("No files downloaded")
             
-            # Get media info
             info = self._sync_fetch_info(uid, url)
             title = info.get('title', 'Instagram Media')
             media_type = info.get('type', 'unknown')
             username = info.get('username', '')
             
-            # Add to cache
             self.cache.add(media_id, {
                 'url': url,
                 'title': title,
@@ -349,17 +325,14 @@ class InstagramDownloaderBot:
     
     # --- Telegram upload helpers ---
     def _split_caption(self, text: str, max_len: int = MAX_CAPTION_LENGTH) -> str:
-        """Truncate caption to Telegram's limit"""
         if len(text) <= max_len:
             return text
         return text[:max_len - 3] + "..."
     
     async def _send_media_batch(self, msg, file_paths: List[str], caption: str, media_type: str):
-        """Send media files to Telegram, batching images into media groups"""
         if not file_paths:
             return
         
-        # Separate images and videos
         images = []
         videos = []
         others = []
@@ -373,7 +346,6 @@ class InstagramDownloaderBot:
             else:
                 others.append(fp)
         
-        # Send images in batches of 10 (Telegram media group limit)
         total_images = len(images)
         if total_images > 0:
             batches = [images[i:i + MAX_IMAGES_PER_MEDIA_GROUP] 
@@ -389,10 +361,9 @@ class InstagramDownloaderBot:
                 for i, fp in enumerate(batch):
                     with open(fp, 'rb') as f:
                         if i == 0 and batch_caption:
-                            media_group.append(telegram.InputMediaPhoto(
-                                media=f, caption=batch_caption))
+                            media_group.append(InputMediaPhoto(media=f, caption=batch_caption))
                         else:
-                            media_group.append(telegram.InputMediaPhoto(media=f))
+                            media_group.append(InputMediaPhoto(media=f))
                 
                 if media_group:
                     try:
@@ -404,7 +375,6 @@ class InstagramDownloaderBot:
                         logger.info(f"Sent image batch {batch_idx + 1}/{len(batches)} ({len(batch)} images)")
                     except Exception as e:
                         logger.error(f"Failed to send image batch: {e}")
-                        # Fallback: send individually
                         for fp in batch:
                             try:
                                 with open(fp, 'rb') as f:
@@ -412,11 +382,9 @@ class InstagramDownloaderBot:
                             except Exception as e2:
                                 logger.error(f"Failed to send individual image: {e2}")
                 
-                # Small delay between batches
                 if len(batches) > 1:
                     await asyncio.sleep(1)
         
-        # Send videos individually
         for fp in videos:
             try:
                 with open(fp, 'rb') as f:
@@ -429,7 +397,6 @@ class InstagramDownloaderBot:
             except Exception as e:
                 logger.error(f"Failed to send video: {e}")
         
-        # Send other files
         for fp in others:
             try:
                 with open(fp, 'rb') as f:
@@ -495,13 +462,9 @@ class InstagramDownloaderBot:
             await u.message.reply_text("❌ Invalid Instagram URL.")
             return
         
-        # Auto-download and send
         await self._auto_download_and_send(uid, url, media_type, media_id, u.message)
     
     async def _auto_download_and_send(self, uid, url, media_type, media_id, msg):
-        """Download media and send to Telegram automatically"""
-        
-        # Check cache first
         if self.cache.is_cached(media_id):
             cached = self.cache.get_cached(media_id)
             file_paths = cached.get('file_paths', [])
@@ -513,11 +476,9 @@ class InstagramDownloaderBot:
                 await status.delete()
                 return
         
-        # Prevent concurrent downloads of same media
         lock = self._get_download_lock(media_id)
         
         async with lock:
-            # Check cache again after acquiring lock
             if self.cache.is_cached(media_id):
                 cached = self.cache.get_cached(media_id)
                 file_paths = cached.get('file_paths', [])
@@ -529,11 +490,9 @@ class InstagramDownloaderBot:
                     await status.delete()
                     return
             
-            # Download
             status = await msg.reply_text("🔍 Fetching media info...")
             
             try:
-                # Update status
                 await status.edit_text("⏳ Downloading...")
                 
                 file_paths, title, dl_type, username = await asyncio.get_event_loop().run_in_executor(
@@ -543,7 +502,6 @@ class InstagramDownloaderBot:
                 total_size = sum(Path(fp).stat().st_size for fp in file_paths)
                 size_mb = total_size / 1024 / 1024
                 
-                # Build caption
                 caption = title
                 if username:
                     caption = f"📱 @{username}\n{title}"
@@ -552,17 +510,14 @@ class InstagramDownloaderBot:
                 
                 await status.edit_text(f"📤 Uploading {file_count} files ({size_mb:.1f}MB)...")
                 
-                # Send media
                 await self._send_media_batch(msg, file_paths, caption, dl_type)
                 
                 await status.delete()
                 
                 logger.info(f"Successfully sent {file_count} files for {media_id}")
                 
-                # Clean up files after successful send
                 for fp in file_paths:
                     Path(fp).unlink(missing_ok=True)
-                # Remove empty dirs
                 parent = Path(file_paths[0]).parent
                 if parent.exists():
                     shutil.rmtree(parent, ignore_errors=True)
@@ -582,15 +537,10 @@ class InstagramDownloaderBot:
         uid = u.effective_user.id
         msg = u.callback_query.message if u.callback_query else u.message
         
-        # Get all cached entries for this user
         entries = []
         for media_id, entry in self.cache._cache.items():
-            entries.append({
-                'media_id': media_id,
-                **entry
-            })
+            entries.append({'media_id': media_id, **entry})
         
-        # Sort by download time (newest first)
         entries.sort(key=lambda x: x.get('download_time', ''), reverse=True)
         
         if not entries:
@@ -672,12 +622,10 @@ class InstagramDownloaderBot:
         q = u.callback_query
         await q.answer()
         
-        # Delete all files
         for entry in self.cache._cache.values():
             for fp in entry.get('file_paths', []):
                 Path(fp).unlink(missing_ok=True)
         
-        # Clear cache
         self.cache._cache = {}
         self.cache._save()
         
@@ -756,9 +704,6 @@ class InstagramDownloaderBot:
     
     def run(self):
         app = Application.builder().token(self.config.BOT_TOKEN).build()
-        
-        # Add the import for InputMediaPhoto
-        import telegram
         
         app.add_handler(CommandHandler('start', self.start_cmd))
         app.add_handler(CommandHandler('help', self.help_cmd))
