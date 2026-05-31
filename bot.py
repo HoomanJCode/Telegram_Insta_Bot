@@ -2,7 +2,7 @@
 """
 Instagram Downloader Telegram Bot
 Uses gallery-dl for reliable Instagram downloads
-Supports posts, reels, stories, IGTV, and profile pictures
+Supports posts, reels, stories, and profile pictures
 """
 
 import os
@@ -15,7 +15,6 @@ import re
 import threading
 import subprocess
 import asyncio
-import socket
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
@@ -37,15 +36,11 @@ for lib in ('httpx', 'httpcore', 'telegram', 'telegram.ext', 'aiohttp'):
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 logger = logging.getLogger('ig_bot')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 h = logging.StreamHandler()
 h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(h)
 logger.propagate = False
-
-fh = logging.FileHandler('debug.log')
-fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(fh)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -59,7 +54,6 @@ INSTAGRAM_RE = re.compile(
     r'(https?://)?(www\.)?instagram\.com/('
     r'p/[^/?#\s]+|'
     r'reel/[^/?#\s]+|'
-    r'tv/[^/?#\s]+|'
     r'stories/[^/?#\s]+|'
     r'[^/?#\s]+/?$'
     r')'
@@ -110,7 +104,6 @@ class InstagramDownloaderBot:
         self._start_cleanup()
     
     def _check_gallery_dl(self):
-        """Check if gallery-dl is installed"""
         try:
             result = subprocess.run(['gallery-dl', '--version'], capture_output=True, text=True)
             logger.info(f"gallery-dl version: {result.stdout.strip()}")
@@ -191,14 +184,9 @@ class InstagramDownloaderBot:
         elif '/reel/' in url:
             m = re.search(r'/reel/([^/?#]+)', url)
             return ('reel', m.group(1) if m else '')
-        elif '/tv/' in url:
-            m = re.search(r'/tv/([^/?#]+)', url)
-            return ('tv', m.group(1) if m else '')
         elif '/stories/' in url:
             m = re.search(r'/stories/([^/?#]+)', url)
-            username = m.group(1) if m else 'unknown'
-            story_id = re.search(r'/stories/[^/]+/(\d+)', url)
-            return ('story', story_id.group(1) if story_id else username)
+            return ('story', m.group(1) if m else 'unknown')
         else:
             m = re.search(r'instagram\.com/([^/?#\s]+)', url)
             return ('profile', m.group(1) if m else 'unknown')
@@ -238,89 +226,67 @@ class InstagramDownloaderBot:
         kb = []
         
         if media_type == 'post':
-            img_label = "🖼️ Post Images"
-            if 'post_image' in existing:
-                img_label = "✅ 🖼️ Post Images"
-            kb.append([InlineKeyboardButton(img_label, callback_data='fmt_post_image')])
-            
-            vid_label = "🎬 Post Video"
-            if 'post_video' in existing:
-                vid_label = "✅ 🎬 Post Video"
-            kb.append([InlineKeyboardButton(vid_label, callback_data='fmt_post_video')])
+            label = "🖼️ Post Images"
+            if 'post' in existing:
+                label = "✅ 🖼️ Post Images"
+            kb.append([InlineKeyboardButton(label, callback_data='fmt_post')])
         
         elif media_type == 'reel':
             label = "🎬 Reel Video"
-            if 'reel_video' in existing:
+            if 'reel' in existing:
                 label = "✅ 🎬 Reel Video"
-            kb.append([InlineKeyboardButton(label, callback_data='fmt_reel_video')])
+            kb.append([InlineKeyboardButton(label, callback_data='fmt_reel')])
         
         elif media_type == 'story':
-            img_label = "📸 Story Image"
-            if 'story_image' in existing:
-                img_label = "✅ 📸 Story Image"
-            kb.append([InlineKeyboardButton(img_label, callback_data='fmt_story_image')])
-            
-            vid_label = "🎥 Story Video"
-            if 'story_video' in existing:
-                vid_label = "✅ 🎥 Story Video"
-            kb.append([InlineKeyboardButton(vid_label, callback_data='fmt_story_video')])
+            label = "📖 Story"
+            if 'story' in existing:
+                label = "✅ 📖 Story"
+            kb.append([InlineKeyboardButton(label, callback_data='fmt_story')])
         
         elif media_type == 'profile':
             label = "🖼️ Profile Picture"
-            if 'profile_pic' in existing:
+            if 'profile' in existing:
                 label = "✅ 🖼️ Profile Picture"
-            kb.append([InlineKeyboardButton(label, callback_data='fmt_profile_pic')])
+            kb.append([InlineKeyboardButton(label, callback_data='fmt_profile')])
         
         kb.append([InlineKeyboardButton("🔙 Cancel", callback_data='b')])
         return InlineKeyboardMarkup(kb)
     
-    # --- Download using gallery-dl ---
+    # --- gallery-dl helpers ---
     def _sync_fetch_info(self, uid, url):
         """Fetch media info using gallery-dl"""
         cookie_path = str(self.cookies[uid])
-        logger.info(f"=== Fetching info for: {url}")
         
         try:
-            cmd = [
-                'gallery-dl',
-                '--cookies', cookie_path,
-                '--dump-json',
-                url
-            ]
-            
+            cmd = ['gallery-dl', '--cookies', cookie_path, '--dump-json', url]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode != 0:
-                logger.error(f"gallery-dl info failed: {result.stderr[:500]}")
-                raise Exception(f"Failed to fetch info: {result.stderr[:200]}")
+                raise Exception(f"gallery-dl failed: {result.stderr[:200]}")
             
-            # Parse gallery-dl JSON output
-            info = None
-            for line in result.stdout.strip().split('\n'):
-                try:
-                    data = json.loads(line)
-                    if isinstance(data, list) and len(data) >= 3 and isinstance(data[2], dict):
-                        info = data[2]
-                        if info.get('username'):
-                            break
-                except json.JSONDecodeError:
-                    continue
+            data = json.loads(result.stdout)
+            
+            # gallery-dl returns a list: first element is [2, {...post_info...}]
+            # subsequent elements are [3, url, {...image_info...}]
+            info = {}
+            if isinstance(data, list) and len(data) > 0:
+                first = data[0]
+                if isinstance(first, list) and len(first) >= 2:
+                    meta = first[1]
+                    if isinstance(meta, dict):
+                        info = {
+                            'title': meta.get('description', '') or f"Post by {meta.get('username', 'Unknown')}",
+                            'id': meta.get('post_shortcode', meta.get('post_id', '')),
+                            'username': meta.get('username', ''),
+                            'fullname': meta.get('fullname', ''),
+                            'count': meta.get('count', len(data) - 1),
+                        }
             
             if not info:
                 raise Exception("Could not parse media info from gallery-dl output")
             
-            # Build info dict compatible with our code
-            parsed_info = {
-                'title': info.get('description', '') or f"Post by {info.get('username', 'Unknown')}",
-                'id': info.get('post_id', info.get('post_shortcode', '')),
-                'username': info.get('username', ''),
-                'fullname': info.get('fullname', ''),
-                'media_type': info.get('type', info.get('subcategory', '')),
-                'count': info.get('count', 1),
-            }
-            
-            logger.info(f"=== Parsed: {parsed_info['title'][:100]} by {parsed_info['username']}")
-            return parsed_info
+            logger.info(f"Fetched: {info['title'][:100]} by {info['username']}")
+            return info
             
         except subprocess.TimeoutExpired:
             raise Exception("Request timed out")
@@ -332,28 +298,17 @@ class InstagramDownloaderBot:
         """Download Instagram media using gallery-dl"""
         cookie_path = str(self.cookies[uid])
         
-        # Create temp directory for download
         download_id = f"{uid}_{int(time.time())}"
         output_dir = DOWNLOADS_DIR / download_id
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"=== Downloading to: {output_dir}")
-        
         try:
-            cmd = [
-                'gallery-dl',
-                '--cookies', cookie_path,
-                '--dest', str(output_dir),
-                url
-            ]
-            
+            cmd = ['gallery-dl', '--cookies', cookie_path, '--dest', str(output_dir), url]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             
             if result.returncode != 0:
-                logger.error(f"gallery-dl failed: {result.stderr[:500]}")
                 raise Exception(f"Download failed: {result.stderr[:200]}")
             
-            # Find all downloaded files
             all_files = []
             for f in output_dir.rglob('*'):
                 if f.is_file():
@@ -362,9 +317,9 @@ class InstagramDownloaderBot:
             if not all_files:
                 raise Exception("No files downloaded")
             
-            logger.info(f"=== Downloaded {len(all_files)} files")
+            logger.info(f"Downloaded {len(all_files)} files")
             
-            # Get info for title
+            # Get info
             info = self._sync_fetch_info(uid, url)
             title = info.get('title', 'Instagram Media')
             media_id = info.get('id', url.split('/')[-2] if '/p/' in url else 'unknown')
@@ -372,7 +327,6 @@ class InstagramDownloaderBot:
             return all_files, title, media_id
             
         except Exception as e:
-            # Clean up on error
             shutil.rmtree(output_dir, ignore_errors=True)
             raise
     
@@ -384,7 +338,7 @@ class InstagramDownloaderBot:
             f"👋 Welcome {u.effective_user.first_name}!\n\n"
             "📱 *Instagram Downloader Bot*\n\n"
             "💡 Supported content:\n"
-            "• Posts (images & videos)\n"
+            "• Posts (images)\n"
             "• Reels\n"
             "• Stories\n"
             "• Profile Pictures\n\n"
@@ -452,11 +406,7 @@ class InstagramDownloaderBot:
             existing = self._get_existing_types(uid, media_id)
             dl = ""
             if existing:
-                dl = "\n✅ " + " ".join({
-                    'post_image': '🖼️', 'post_video': '🎬',
-                    'reel_video': '🎬', 'story_image': '📸',
-                    'story_video': '🎥', 'profile_pic': '🖼️'
-                }.get(t, '📱') for t in existing)
+                dl = "\n✅ Already downloaded"
             
             type_labels = {
                 'post': '📷 Post', 'reel': '🎬 Reel',
@@ -472,17 +422,7 @@ class InstagramDownloaderBot:
         except asyncio.TimeoutError:
             await s.edit_text("❌ Request timed out.", reply_markup=self._menu(uid))
         except Exception as e:
-            error_msg = str(e)[:200]
-            logger.error(f"Fetch error: {error_msg}")
-            
-            if "private" in error_msg.lower():
-                user_msg = "❌ This content is private.\nYou need to follow this account."
-            elif "rate" in error_msg.lower() or "429" in error_msg:
-                user_msg = "❌ Instagram rate limit. Wait a few minutes."
-            else:
-                user_msg = f"❌ Failed: {error_msg}"
-            
-            await s.edit_text(user_msg, reply_markup=self._menu(uid))
+            await s.edit_text(f"❌ Failed: {str(e)[:200]}", reply_markup=self._menu(uid))
     
     async def _choose_format(self, u, c):
         q = u.callback_query
@@ -496,19 +436,16 @@ class InstagramDownloaderBot:
         url, media_id, media_type, title = self._pending_urls[uid]
         
         format_map = {
-            'fmt_post_image': 'post_image',
-            'fmt_post_video': 'post_video',
-            'fmt_reel_video': 'reel_video',
-            'fmt_story_image': 'story_image',
-            'fmt_story_video': 'story_video',
-            'fmt_profile_pic': 'profile_pic',
+            'fmt_post': 'post',
+            'fmt_reel': 'reel',
+            'fmt_story': 'story',
+            'fmt_profile': 'profile',
         }
         
         download_type = format_map.get(fmt)
         if not download_type:
             return
         
-        # Check for existing
         existing = self._find_existing(uid, media_id, download_type)
         if existing and existing.telegram_file_ids:
             await q.answer("Resending...")
@@ -524,7 +461,6 @@ class InstagramDownloaderBot:
         self._download_tasks[uid] = task
     
     async def _download_and_upload(self, uid, url, msg, download_type, title):
-        """Download and upload to Telegram"""
         try:
             file_paths, dl_title, media_id = await asyncio.get_event_loop().run_in_executor(
                 None, self._sync_download, uid, url, download_type)
@@ -564,7 +500,6 @@ class InstagramDownloaderBot:
             self._download_tasks.pop(uid, None)
     
     async def _upload_media(self, msg, record):
-        """Upload media files to Telegram"""
         existing_files = [fp for fp in record.file_paths if Path(fp).exists()]
         if not existing_files:
             await msg.edit_text("❌ Files deleted.", reply_markup=self._menu(msg.chat.id))
@@ -591,8 +526,7 @@ class InstagramDownloaderBot:
                 
                 with open(fp, 'rb') as f:
                     if is_video:
-                        sent = await msg.reply_video(
-                            video=f, caption=caption, supports_streaming=True)
+                        sent = await msg.reply_video(video=f, caption=caption, supports_streaming=True)
                         sent_ids.append(sent.video.file_id)
                     elif is_image:
                         sent = await msg.reply_photo(photo=f, caption=caption)
@@ -611,7 +545,7 @@ class InstagramDownloaderBot:
             # Clean up files
             for fp in record.file_paths:
                 Path(fp).unlink(missing_ok=True)
-            # Remove empty directories
+            # Remove empty dirs
             for fp in record.file_paths:
                 parent = Path(fp).parent
                 if parent.exists() and not any(parent.iterdir()):
@@ -622,7 +556,6 @@ class InstagramDownloaderBot:
             await msg.edit_text("❌ Upload failed.", reply_markup=self._menu(msg.chat.id))
     
     async def _resend_media(self, msg, record):
-        """Resend using cached file IDs"""
         if not record.telegram_file_ids:
             await self._upload_media(msg, record)
             return
@@ -648,8 +581,7 @@ class InstagramDownloaderBot:
         media_list = self.media.get(uid, [])
         
         if not media_list:
-            await msg.reply_text(
-                "📭 No recent downloads.",
+            await msg.reply_text("📭 No recent downloads.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 Menu", callback_data='b')
                 ]]))
@@ -659,11 +591,7 @@ class InstagramDownloaderBot:
         page = max(0, min(page, tp - 1))
         pv = media_list[page * pp:(page + 1) * pp]
         
-        type_emoji = {
-            'post_image': '🖼️', 'post_video': '🎬',
-            'reel_video': '🎬', 'story_image': '📸',
-            'story_video': '🎥', 'profile_pic': '🖼️'
-        }
+        type_emoji = {'post': '🖼️', 'reel': '🎬', 'story': '📖', 'profile': '🖼️'}
         
         txt = f"📱 *Recent Downloads* ({page + 1}/{tp})\n\n"
         for i, m in enumerate(pv, page * pp + 1):
@@ -725,8 +653,7 @@ class InstagramDownloaderBot:
             "1️⃣ Login to Instagram in browser\n"
             "2️⃣ Use 'Get cookies.txt LOCALLY' extension\n"
             "3️⃣ Click Export (not Export As JSON)\n"
-            "4️⃣ Send the .txt file here\n\n"
-            "Works with gallery-dl downloader.",
+            "4️⃣ Send the .txt file here",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Cancel", callback_data='b')
@@ -739,11 +666,7 @@ class InstagramDownloaderBot:
             return ConversationHandler.END
         
         if not u.message.document:
-            await u.message.reply_text(
-                "❌ Please send the cookies.txt file.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Cancel", callback_data='b')
-                ]]))
+            await u.message.reply_text("❌ Please send the cookies.txt file.")
             return WAITING_FOR_COOKIES
         
         try:
@@ -751,15 +674,8 @@ class InstagramDownloaderBot:
             await f.download_to_drive(str(self._cookie_path(uid)))
             self.cookies[uid] = self._cookie_path(uid)
             self._save()
-            
             await u.message.reply_text(
-                "✅ Cookies saved!\n\n"
-                "Send any Instagram link to download.\n\n"
-                "Supported:\n"
-                "• Posts (images & videos)\n"
-                "• Reels\n"
-                "• Stories\n"
-                "• Profile Pictures",
+                "✅ Cookies saved!\n\nSend any Instagram link to download.",
                 reply_markup=self._menu(uid))
             return ConversationHandler.END
         except Exception as e:
