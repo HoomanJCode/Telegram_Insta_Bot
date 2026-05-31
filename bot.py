@@ -269,76 +269,156 @@ class InstagramDownloaderBot:
         return InlineKeyboardMarkup(kb)
     
     # --- Sync helpers (run in executor) ---
+    # --- Sync helpers (run in executor) ---
     def _sync_fetch_info(self, uid, url):
+        """Fetch media info with proper Instagram impersonation"""
         opts = {
             'cookiefile': str(self.cookies[uid]),
-            'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3,
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 30,
+            'retries': 5,
             'extract_flat': False,
+            # Instagram-specific options
+            'add_header': [
+                'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language:en-US,en;q=0.9',
+                'Accept-Encoding:gzip, deflate, br',
+                'Sec-Fetch-Dest:document',
+                'Sec-Fetch-Mode:navigate',
+                'Sec-Fetch-Site:none',
+                'Sec-Fetch-User:?1',
+                'Upgrade-Insecure-Requests:1',
+            ],
+            'extractor_args': {
+                'instagram': [
+                    'no_rate_limit',
+                ]
+            },
         }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise Exception("No info returned - possibly private/blocked")
+                return info
+        except Exception as e:
+            logger.error("Info fetch error: %s", str(e))
+            raise
     
     def _sync_download(self, uid, url, media_type):
+        """Download Instagram media with proper impersonation"""
         base_opts = {
             'cookiefile': str(self.cookies[uid]),
-            'quiet': True, 'no_warnings': True,
-            'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 120,
+            'retries': 50,
+            'fragment_retries': 50,
             'no_mtime': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            # Instagram-specific headers and options
+            'add_header': [
+                'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language:en-US,en;q=0.9',
+                'Sec-Fetch-Dest:document',
+                'Sec-Fetch-Mode:navigate',
+                'Sec-Fetch-Site:none',
+            ],
+            'extractor_args': {
+                'instagram': [
+                    'no_rate_limit',
+                ]
+            },
+            # Try to extract even if some metadata fails
+            'ignoreerrors': False,
+            'extract_flat': False,
+            'no_check_certificate': True,
         }
         
         if 'video' in media_type or 'reel' in media_type or 'tv' in media_type:
-            opts = {**base_opts, 
-                    'format': 'best[ext=mp4]/best',
-                    'outtmpl': str(DOWNLOADS_DIR / '%(id)s_%(format_id)s.%(ext)s'),
-                    'merge_output_format': 'mp4'}
+            opts = {
+                **base_opts,
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': str(DOWNLOADS_DIR / '%(id)s_%(format_id)s.%(ext)s'),
+                'merge_output_format': 'mp4',
+            }
         elif 'profile_pic' in media_type:
-            opts = {**base_opts,
-                    'playlist_items': '0',
-                    'skip_download': True,
-                    'writethumbnail': True,
-                    'outtmpl': str(DOWNLOADS_DIR / '%(id)s_profile.%(ext)s')}
+            opts = {
+                **base_opts,
+                'playlist_items': '0',
+                'skip_download': True,
+                'writethumbnail': True,
+                'outtmpl': str(DOWNLOADS_DIR / '%(id)s_profile.%(ext)s'),
+            }
         else:
-            opts = {**base_opts,
-                    'format': 'best',
-                    'outtmpl': str(DOWNLOADS_DIR / '%(id)s_%(format_id)s.%(ext)s')}
+            opts = {
+                **base_opts,
+                'format': 'best',
+                'outtmpl': str(DOWNLOADS_DIR / '%(id)s_%(format_id)s.%(ext)s'),
+            }
         
-        # Rate limiting delay
+        # Rate limiting delay with exponential backoff
         import random
-        time.sleep(random.uniform(1, 3))
+        time.sleep(random.uniform(2, 5))
         
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+                if not info:
+                    raise FileNotFoundError("yt-dlp returned no info")
+                    
                 title = info.get('title', 'Instagram Media')
                 vid = info.get('id', '')
                 
                 downloaded_files = []
                 
+                # Handle both single media and playlists (carousels)
                 entries = info.get('entries') or [info]
                 for entry in entries:
                     if entry is None:
                         continue
+                    
+                    # Check requested_downloads for actual files
                     for rd in entry.get('requested_downloads', []):
                         fp = rd.get('filepath')
                         if fp and Path(fp).exists():
                             downloaded_files.append(fp)
+                            logger.info(f"Downloaded: {fp}")
                     
+                    # Fallback: find files by ID pattern
                     if not entry.get('requested_downloads'):
-                        for ext in ('.jpg', '.jpeg', '.png', '.webp', '.mp4', '.webm'):
+                        for ext in ('.jpg', '.jpeg', '.png', '.webp', '.mp4', '.webm', '.mp3'):
                             pattern = f'{vid}*{ext}'
                             for f in DOWNLOADS_DIR.glob(pattern):
-                                if str(f) not in downloaded_files:
-                                    downloaded_files.append(str(f))
+                                fp = str(f)
+                                if fp not in downloaded_files:
+                                    downloaded_files.append(fp)
+                                    logger.info(f"Found by pattern: {fp}")
                 
                 if not downloaded_files:
-                    raise FileNotFoundError(f"No files downloaded for {url}")
+                    # Last resort: list all recently created files
+                    recent_files = sorted(
+                        DOWNLOADS_DIR.iterdir(),
+                        key=lambda x: x.stat().st_mtime,
+                        reverse=True
+                    )
+                    for f in recent_files[:10]:  # Check last 10 files
+                        if f.is_file() and f.stem.startswith(vid):
+                            downloaded_files.append(str(f))
+                            logger.info(f"Found recent file: {f}")
+                
+                if not downloaded_files:
+                    raise FileNotFoundError(f"No files downloaded for {url}. ID: {vid}")
                 
                 return downloaded_files, title, vid
+                
         except Exception as e:
-            logger.error("Download failed for %s: %s", url, str(e)[:100])
+            logger.error("Download failed for %s: %s", url, str(e)[:200])
             raise
-    
+            
+            
     # --- Async handlers ---
     async def start_cmd(self, u, c):
         if not self._ok(u.effective_user.id): 
