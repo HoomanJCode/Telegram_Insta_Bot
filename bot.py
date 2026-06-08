@@ -3,7 +3,7 @@
 Instagram Downloader Telegram Bot
 Uses gallery-dl for reliable Instagram downloads
 Auto-downloads and sends media, caches Telegram file IDs to prevent re-uploads
-Cookies stored as Telegram file IDs - re-downloaded on bot restart
+Supports inline mode - use @botname <link> in any chat
 """
 
 import os
@@ -20,11 +20,15 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
+from uuid import uuid4
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto,
+    InlineQueryResultArticle, InputTextMessageContent
+)
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes
+    ConversationHandler, filters, ContextTypes, InlineQueryHandler
 )
 from telegram.constants import ParseMode
 
@@ -64,6 +68,7 @@ INSTAGRAM_RE = re.compile(
 
 MAX_IMAGES_PER_MEDIA_GROUP = 10
 MAX_CAPTION_LENGTH = 1024
+INLINE_TRIGGER_PREFIX = "📥 "
 
 # ---------------------------------------------------------------------------
 # File ID Cache
@@ -135,9 +140,7 @@ class InstagramDownloaderBot:
         for d in (DATA_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
         
-        # Cookies: user_id -> temp file path (RAM only)
         self.cookies: Dict[int, str] = {}
-        # Cookie file IDs: user_id -> Telegram file_id (persisted to disk)
         self.cookie_file_ids: Dict[int, str] = {}
         
         self.file_id_cache = FileIDCache(self.config.STORAGE_DAYS)
@@ -157,7 +160,6 @@ class InstagramDownloaderBot:
             subprocess.run([sys.executable, '-m', 'pip', 'install', 'gallery-dl'], check=True)
     
     def _load_cookie_ids(self):
-        """Load persisted cookie Telegram file IDs"""
         try:
             if COOKIE_IDS_FILE.exists():
                 data = json.loads(COOKIE_IDS_FILE.read_text())
@@ -168,7 +170,6 @@ class InstagramDownloaderBot:
             self.cookie_file_ids = {}
     
     def _save_cookie_ids(self):
-        """Save cookie Telegram file IDs to disk"""
         try:
             COOKIE_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
             COOKIE_IDS_FILE.write_text(json.dumps(
@@ -188,16 +189,13 @@ class InstagramDownloaderBot:
     
     def _cleanup(self):
         cutoff = datetime.now() - timedelta(days=self.config.STORAGE_DAYS)
-        
         for f in DOWNLOADS_DIR.iterdir():
             if f.is_file() and datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
                 f.unlink()
                 logger.info(f"Cleaned up file: {f.name}")
-        
         for d in DOWNLOADS_DIR.iterdir():
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
-        
         self.file_id_cache.cleanup_expired()
     
     def _ok(self, uid):
@@ -233,7 +231,6 @@ class InstagramDownloaderBot:
         has_cookies = uid in self.cookies
         has_cookie_id = uid in self.cookie_file_ids
         cache_count = len(self.file_id_cache._cache)
-        
         cookie_status = "✅" if has_cookies else ("💾" if has_cookie_id else "❌")
         
         return InlineKeyboardMarkup([
@@ -242,38 +239,25 @@ class InstagramDownloaderBot:
              InlineKeyboardButton(f"💾 {cache_count} cached", callback_data='cache_info')],
         ])
     
-    # --- Cookie management ---
     async def _ensure_cookies_loaded(self, uid: int, context) -> bool:
-        """Ensure cookies are loaded in RAM. If not, try to download from Telegram file ID."""
         if uid in self.cookies:
             return True
-        
-        # Check if we have a file ID to download from
         if uid not in self.cookie_file_ids:
             return False
         
         lock = self._get_cookie_lock(uid)
-        
         async with lock:
-            # Check again after acquiring lock
             if uid in self.cookies:
                 return True
-            
             try:
                 file_id = self.cookie_file_ids[uid]
-                
-                # Download cookie file from Telegram
                 tg_file = await context.bot.get_file(file_id)
-                
-                # Save to temp file
                 tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
                 tmp_path = tmp.name
                 await tg_file.download_to_drive(tmp_path)
                 
-                # Validate
                 with open(tmp_path, 'r') as f:
                     content = f.read()
-                
                 if 'instagram.com' not in content:
                     os.unlink(tmp_path)
                     logger.warning(f"Downloaded cookie file for {uid} is invalid")
@@ -282,12 +266,10 @@ class InstagramDownloaderBot:
                 self.cookies[uid] = tmp_path
                 logger.info(f"Cookies loaded from Telegram for user {uid}")
                 return True
-                
             except Exception as e:
                 logger.error(f"Failed to download cookies for {uid}: {e}")
                 return False
     
-    # --- gallery-dl helpers ---
     def _sync_download(self, uid, url):
         cookie_path = self.cookies[uid]
         output_dir = self._get_unique_download_dir(uid)
@@ -343,7 +325,6 @@ class InstagramDownloaderBot:
         
         return {'title': 'Instagram Media', 'username': ''}
     
-    # --- Telegram upload helpers ---
     def _split_caption(self, text: str, max_len: int = MAX_CAPTION_LENGTH) -> str:
         if len(text) <= max_len:
             return text
@@ -459,7 +440,7 @@ class InstagramDownloaderBot:
             logger.error(f"Resend error: {e}")
             return False
     
-    # --- Async handlers ---
+    # --- Handlers ---
     async def start_cmd(self, u, c):
         if not self._ok(u.effective_user.id):
             return
@@ -484,6 +465,8 @@ class InstagramDownloaderBot:
             "• Reels → Video\n"
             "• Stories → Images/videos\n"
             "• Profiles → Profile picture\n\n"
+            "🌐 *Inline Mode:*\n"
+            "Type @botname <link> in any chat!\n\n"
             f"{cookie_info}\n"
             "🔄 Duplicate links use cached Telegram files\n"
             f"🗑️ Cache expires after {self.config.STORAGE_DAYS}d.",
@@ -496,6 +479,8 @@ class InstagramDownloaderBot:
             "Commands:\n"
             "/cookies - Upload Instagram cookies\n"
             "/start - Main menu\n\n"
+            "🌐 *Inline Mode:* Type @botname <link> in any chat\n"
+            "to share Instagram media instantly.\n\n"
             "🔒 *Cookies:* Stored as Telegram file IDs on disk.\n"
             "Cookie content only in RAM, auto-loaded on restart.",
             parse_mode=ParseMode.MARKDOWN,
@@ -514,7 +499,6 @@ class InstagramDownloaderBot:
         if not url:
             return
         
-        # Try to load cookies if not in RAM
         if uid not in self.cookies:
             loaded = await self._ensure_cookies_loaded(uid, c)
             if not loaded:
@@ -529,7 +513,6 @@ class InstagramDownloaderBot:
         await self._auto_download_and_send(uid, url, u.message)
     
     async def _auto_download_and_send(self, uid, url, msg):
-        # Check file ID cache first
         cached = self.file_id_cache.get(url)
         if cached and cached.get('file_ids'):
             status = await msg.reply_text("📤 Sending from cache...")
@@ -598,6 +581,87 @@ class InstagramDownloaderBot:
                     "⚠️ Re-upload cookies with /cookies if needed",
                     reply_markup=self._menu(uid))
     
+    async def inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.inline_query.query.strip()
+        uid = update.inline_query.from_user.id
+        
+        if not self._ok(uid):
+            await update.inline_query.answer([], switch_pm_text="❌ Not authorized", switch_pm_parameter="start")
+            return
+        
+        url = self._extract_url(query)
+        if not url:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="Send an Instagram link",
+                    description="Example: https://www.instagram.com/p/CODE/",
+                    input_message_content=InputTextMessageContent(
+                        "📱 Send an Instagram link to download."
+                    )
+                )
+            ]
+            await update.inline_query.answer(results, cache_time=10)
+            return
+        
+        cached = self.file_id_cache.get(url)
+        if cached:
+            file_ids = cached.get('file_ids', [])
+            title = cached.get('title', 'Instagram Media')
+            
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title=f"📱 {title[:50]}",
+                    description=f"Tap to send from cache ({len(file_ids)} files)",
+                    input_message_content=InputTextMessageContent(
+                        f"{INLINE_TRIGGER_PREFIX}{url}"
+                    )
+                )
+            ]
+            await update.inline_query.answer(results, cache_time=30)
+            return
+        
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="📥 Download Instagram media",
+                description=f"Download from {url[:60]}",
+                input_message_content=InputTextMessageContent(
+                    f"{INLINE_TRIGGER_PREFIX}{url}"
+                )
+            )
+        ]
+        await update.inline_query.answer(results, cache_time=10)
+    
+    async def handle_inline_trigger(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.message
+        if not msg or not msg.text:
+            return
+        if not msg.text.startswith(INLINE_TRIGGER_PREFIX):
+            return
+        
+        uid = msg.from_user.id
+        if not self._ok(uid):
+            return
+        
+        url = msg.text[len(INLINE_TRIGGER_PREFIX):].strip()
+        if not self._extract_url(url):
+            return
+        
+        if uid not in self.cookies:
+            loaded = await self._ensure_cookies_loaded(uid, context)
+            if not loaded:
+                await msg.reply_text("❌ Cookies not available. Please set them in private chat with /cookies.")
+                return
+        
+        cached = self.file_id_cache.get(url)
+        if cached and cached.get('file_ids'):
+            await self._resend_by_file_ids(msg, cached)
+            return
+        
+        await self._auto_download_and_send(uid, url, msg)
+    
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
             return ConversationHandler.END
@@ -628,14 +692,11 @@ class InstagramDownloaderBot:
         
         try:
             doc = u.message.document
-            
-            # Download to temp file for validation and use
             tg_file = await c.bot.get_file(doc.file_id)
             tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
             tmp_path = tmp.name
             await tg_file.download_to_drive(tmp_path)
             
-            # Validate
             with open(tmp_path, 'r') as f:
                 content = f.read()
             
@@ -646,10 +707,7 @@ class InstagramDownloaderBot:
                     "Make sure you're logged into Instagram and export correctly.")
                 return WAITING_FOR_COOKIES
             
-            # Store cookie file path in RAM
             self.cookies[uid] = tmp_path
-            
-            # Save Telegram file ID to disk for future restarts
             self.cookie_file_ids[uid] = doc.file_id
             self._save_cookie_ids()
             
@@ -659,7 +717,8 @@ class InstagramDownloaderBot:
                 "💾 Telegram file ID saved to disk\n"
                 "🔄 Cookies will auto-load on bot restart\n\n"
                 "Now send any Instagram link to download.\n"
-                "Duplicate links will use cached Telegram files.",
+                "Duplicate links will use cached Telegram files.\n\n"
+                "🌐 *Inline Mode:* Type @botname <link> in any chat!",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=self._menu(uid))
             return ConversationHandler.END
@@ -705,7 +764,8 @@ class InstagramDownloaderBot:
                 f"💾 {len(self.file_id_cache._cache)} URLs cached\n"
                 f"🗑️ Cache expires after {self.config.STORAGE_DAYS} days\n"
                 f"🔄 Duplicate links use cached Telegram files instead of downloading again\n"
-                f"💾 Cookie file IDs saved for {len(self.cookie_file_ids)} users",
+                f"💾 Cookie file IDs saved for {len(self.cookie_file_ids)} users\n\n"
+                f"🌐 Inline mode: @botname <link> in any chat",
                 reply_markup=self._menu(uid)),
         }
         
@@ -734,9 +794,14 @@ class InstagramDownloaderBot:
             ],
             per_message=False))
         app.add_handler(CallbackQueryHandler(self._router))
+        app.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(f'^{re.escape(INLINE_TRIGGER_PREFIX)}'),
+            self.handle_inline_trigger
+        ))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
+        app.add_handler(InlineQueryHandler(self.inline_query))
         
-        logger.info(f"Instagram Bot starting (cookie IDs: {len(self.cookie_file_ids)}, cache: {len(self.file_id_cache._cache)})...")
+        logger.info(f"Instagram Bot starting (inline mode, cookie IDs: {len(self.cookie_file_ids)}, cache: {len(self.file_id_cache._cache)})...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
