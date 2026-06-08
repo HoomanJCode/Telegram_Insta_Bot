@@ -805,11 +805,8 @@ class InstagramDownloaderBot:
             title = cached.get('title', 'Instagram Media')
             username = cached.get('username', '')
             
-            caption = title
-            if username:
-                caption = f"📱 @{username}\n{title}"
-            
             start_param = f"dl_{url.replace('/', '_')[:50]}"
+            bot_link = f"https://t.me/{bot_username}?start={start_param}"
             
             results = [
                 InlineQueryResultArticle(
@@ -817,11 +814,11 @@ class InstagramDownloaderBot:
                     title=f"📱 {title[:50]}",
                     description=f"✅ Ready ({len(file_ids)} files) - Tap to get in bot",
                     input_message_content=InputTextMessageContent(
-                        f"📱 Instagram media ready!\n👉 [Open in bot](tg://resolve?domain={bot_username}&start={start_param})",
+                        f"📱 [Instagram Media]({bot_link})",
                         parse_mode=ParseMode.MARKDOWN
                     ),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Get Media", url=f"tg://resolve?domain={bot_username}&start={start_param}")
+                        InlineKeyboardButton("📥 Get Media", url=bot_link)
                     ]])
                 )
             ]
@@ -858,6 +855,7 @@ class InstagramDownloaderBot:
             asyncio.create_task(self._background_download(download_id, cookie_uid, url))
             
             start_param = f"dl_{download_id}"
+            bot_link = f"https://t.me/{bot_username}?start={start_param}"
             
             results = [
                 InlineQueryResultArticle(
@@ -865,11 +863,11 @@ class InstagramDownloaderBot:
                     title="📥 Download started...",
                     description="Tap to check status in bot",
                     input_message_content=InputTextMessageContent(
-                        f"⏳ Downloading...\n👉 [Check in bot](tg://resolve?domain={bot_username}&start={start_param})",
+                        f"⏳ [Downloading...]({bot_link})",
                         parse_mode=ParseMode.MARKDOWN
                     ),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Check Download", url=f"tg://resolve?domain={bot_username}&start={start_param}")
+                        InlineKeyboardButton("📥 Check Download", url=bot_link)
                     ]])
                 )
             ]
@@ -881,12 +879,12 @@ class InstagramDownloaderBot:
                     title="❌ No cookies available",
                     description="Set up cookies in bot first",
                     input_message_content=InputTextMessageContent(
-                        f"❌ Set up Instagram cookies first: tg://resolve?domain={bot_username}&start=cookies"
+                        f"❌ Set up Instagram cookies first: https://t.me/{bot_username}?start=cookies"
                     )
                 )
             ]
             await update.inline_query.answer(results, cache_time=10)
-    
+            
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
             return ConversationHandler.END
