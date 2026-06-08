@@ -24,7 +24,8 @@ from uuid import uuid4
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto,
-    InlineQueryResultArticle, InputTextMessageContent
+    InlineQueryResultArticle, InputTextMessageContent,
+    InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -142,7 +143,7 @@ class InstagramDownloaderBot:
         self.cookies: Dict[int, str] = {}
         self.cookie_file_ids: Dict[int, str] = {}
         self._pending_downloads: Dict[str, dict] = {}
-        self._allowed_groups: Dict[int, bool] = {}  # Cache group permission checks
+        self._allowed_groups: Dict[int, bool] = {}
         
         self.file_id_cache = FileIDCache(self.config.STORAGE_DAYS)
         self._download_locks: Dict[str, asyncio.Lock] = {}
@@ -202,7 +203,6 @@ class InstagramDownloaderBot:
         expired = [k for k, v in self._pending_downloads.items() if v.get('started_at', 0) < cutoff_ts]
         for k in expired:
             del self._pending_downloads[k]
-        # Clear group permission cache periodically
         self._allowed_groups.clear()
     
     def _ok(self, uid):
@@ -215,12 +215,10 @@ class InstagramDownloaderBot:
         return uid in admins
     
     async def _is_group_allowed(self, chat_id, context) -> bool:
-        """Check if group has any whitelisted admin/owner"""
         whitelist = self.config.get_whitelist()
         if not whitelist:
-            return True  # No whitelist = all groups allowed
+            return True
         
-        # Check cache first
         if chat_id in self._allowed_groups:
             return self._allowed_groups[chat_id]
         
@@ -501,7 +499,6 @@ class InstagramDownloaderBot:
             return False
     
     async def _background_download(self, download_id: str, uid: int, url: str):
-        """Download in background and update status"""
         try:
             self._pending_downloads[download_id]['status'] = 'downloading'
             
@@ -537,14 +534,12 @@ class InstagramDownloaderBot:
         uid = u.effective_user.id
         args = c.args
         
-        # Handle deep links - no whitelist check needed
         if args:
             deep_link = args[0]
             
             if deep_link.startswith('dl_'):
                 download_ref = deep_link[3:]
                 
-                # Check if it's a URL-based reference (cached content)
                 cached = None
                 for url_key in self.file_id_cache._cache:
                     if url_key.replace('/', '_')[:50] == download_ref:
@@ -568,7 +563,6 @@ class InstagramDownloaderBot:
                         await asyncio.sleep(0.3)
                     return
                 
-                # Check if it's a pending download
                 if download_ref in self._pending_downloads:
                     pending = self._pending_downloads[download_ref]
                     status = pending.get('status', 'unknown')
@@ -626,7 +620,6 @@ class InstagramDownloaderBot:
                 await self._ask_cookies(u, c)
                 return
         
-        # Normal start - whitelist check
         if not self._ok(uid):
             return
         
@@ -668,7 +661,6 @@ class InstagramDownloaderBot:
         return ConversationHandler.END
     
     async def on_private_msg(self, u, c):
-        """Handle private messages"""
         uid = u.effective_user.id
         if not self._ok(uid):
             return
@@ -696,19 +688,16 @@ class InstagramDownloaderBot:
         await self._auto_download_and_send(uid, url, u.message.chat_id, c)
     
     async def on_group_msg(self, u, c):
-        """Handle group messages - silent if not allowed or no cookies"""
         uid = u.effective_user.id
         chat_id = u.effective_chat.id
         
-        # Check if group is allowed (has whitelisted admin)
         if not await self._is_group_allowed(chat_id, c):
             return
         
-        # Must have cookies
         if uid not in self.cookies:
             loaded = await self._ensure_cookies_loaded(uid, c)
             if not loaded:
-                return  # Silent
+                return
         
         url = self._extract_url(u.message.text)
         if not url:
@@ -716,13 +705,11 @@ class InstagramDownloaderBot:
         
         message_id = u.message.message_id
         
-        # Check cache first
         cached = self.file_id_cache.get(url)
         if cached and cached.get('file_ids'):
             await self._resend_by_file_ids(chat_id, c, cached, reply_to_message_id=message_id)
             return
         
-        # Download with status
         status = await u.message.reply_text("⏳ Downloading...")
         try:
             await self._auto_download_and_send(uid, url, chat_id, c, reply_to_message_id=message_id)
@@ -771,7 +758,6 @@ class InstagramDownloaderBot:
                 
             except Exception as e:
                 logger.error(f"Download error: {str(e)[:200]}")
-                # Silent in groups, show error in private
                 if reply_to_message_id is None:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -801,23 +787,48 @@ class InstagramDownloaderBot:
         if cached:
             file_ids = cached.get('file_ids', [])
             title = cached.get('title', 'Instagram Media')
+            username = cached.get('username', '')
+            
+            caption = title
+            if username:
+                caption = f"📱 @{username}\n{title}"
+            
+            results = []
+            for i, fid in enumerate(file_ids[:10]):
+                cap = caption if i == 0 else None
+                results.append(
+                    InlineQueryResultCachedVideo(
+                        id=str(uuid4()),
+                        video_file_id=fid,
+                        title=title[:50],
+                        caption=cap,
+                    )
+                )
+                results.append(
+                    InlineQueryResultCachedPhoto(
+                        id=str(uuid4()),
+                        photo_file_id=fid,
+                        title=title[:50],
+                        caption=cap,
+                    )
+                )
             
             start_param = f"dl_{url.replace('/', '_')[:50]}"
-            
-            results = [
+            results.append(
                 InlineQueryResultArticle(
                     id=str(uuid4()),
-                    title=f"📱 {title[:50]}",
-                    description=f"✅ Ready ({len(file_ids)} files) - Tap to get in bot",
+                    title=f"📱 {title[:50]} (all {len(file_ids)} files)",
+                    description="Tap to get all files in bot",
                     input_message_content=InputTextMessageContent(
-                        f"📱 Instagram media ready!\n👉 [Open in bot](https://t.me/{bot_username}?start={start_param})",
+                        f"📱 Instagram media ready!\n👉 [Open in bot](tg://resolve?domain={bot_username}&start={start_param})",
                         parse_mode=ParseMode.MARKDOWN
                     ),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Get Media", url=f"https://t.me/{bot_username}?start={start_param}")
+                        InlineKeyboardButton("📥 Get All Files", url=f"tg://resolve?domain={bot_username}&start={start_param}")
                     ]])
                 )
-            ]
+            )
+            
             await update.inline_query.answer(results, cache_time=30)
             return
         
@@ -858,11 +869,11 @@ class InstagramDownloaderBot:
                     title="📥 Download started...",
                     description="Tap to check status in bot",
                     input_message_content=InputTextMessageContent(
-                        f"⏳ Downloading Instagram media...\n👉 [Check status in bot](https://t.me/{bot_username}?start={start_param})",
+                        f"⏳ Downloading...\n👉 [Check in bot](tg://resolve?domain={bot_username}&start={start_param})",
                         parse_mode=ParseMode.MARKDOWN
                     ),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Check Download", url=f"https://t.me/{bot_username}?start={start_param}")
+                        InlineKeyboardButton("📥 Check Download", url=f"tg://resolve?domain={bot_username}&start={start_param}")
                     ]])
                 )
             ]
@@ -874,7 +885,7 @@ class InstagramDownloaderBot:
                     title="❌ No cookies available",
                     description="Set up cookies in bot first",
                     input_message_content=InputTextMessageContent(
-                        f"❌ Set up Instagram cookies first: https://t.me/{bot_username}?start=cookies"
+                        f"❌ Set up Instagram cookies first: tg://resolve?domain={bot_username}&start=cookies"
                     )
                 )
             ]
@@ -987,7 +998,6 @@ class InstagramDownloaderBot:
     
     async def _check_download(self, u, c, download_ref: str):
         q = u.callback_query
-        uid = u.effective_user.id
         
         if download_ref in self._pending_downloads:
             pending = self._pending_downloads[download_ref]
