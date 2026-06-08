@@ -281,8 +281,8 @@ class InstagramDownloaderBot:
             [InlineKeyboardButton(f"📊 Stats: {cache_count} cached, {cookie_count} users", callback_data='admin_stats')],
         ])
     
-    async def _show_start(self, update, context):
-        """Show the /start message (works for both commands and callback queries)"""
+    async def _show_start(self, update, context, edit=False):
+        """Show welcome message. If edit=True, edit existing message; otherwise send new."""
         if update.callback_query:
             uid = update.callback_query.from_user.id
             msg = update.callback_query.message
@@ -294,7 +294,7 @@ class InstagramDownloaderBot:
         reply_markup = self._admin_menu(uid) if self._is_admin(uid) else self._menu(uid)
         bot_username = context.bot.username
         
-        await msg.edit_text(
+        text = (
             f"👋 Welcome {update.effective_user.first_name}!\n\n"
             "📱 *Instagram Downloader Bot*\n\n"
             "💡 Just send an Instagram link!\n"
@@ -308,9 +308,13 @@ class InstagramDownloaderBot:
             "a whitelisted user is admin\n\n"
             f"🍪 Cookies: {cookie_status}\n"
             "🔄 Duplicate links use cache\n"
-            f"🗑️ Cache: {self.config.STORAGE_DAYS}d",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup)
+            f"🗑️ Cache: {self.config.STORAGE_DAYS}d"
+        )
+        
+        if edit:
+            await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        else:
+            await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
     
     async def _ensure_cookies_loaded(self, uid: int, context) -> bool:
         if uid in self.cookies:
@@ -579,7 +583,7 @@ class InstagramDownloaderBot:
                 if cached:
                     file_ids = cached.get('file_ids', [])
                     title = cached.get('title', 'Instagram Media')
-                    await u.message.reply_text(f"📤 Sending {len(file_ids)} files...")
+                    status_msg = await u.message.reply_text(f"📤 Sending {len(file_ids)} files...")
                     
                     for i, fid in enumerate(file_ids):
                         caption = title if i == 0 else None
@@ -591,6 +595,7 @@ class InstagramDownloaderBot:
                             except:
                                 await c.bot.send_document(chat_id=uid, document=fid, caption=caption)
                         await asyncio.sleep(0.3)
+                    await status_msg.delete()
                     return
                 
                 if download_ref in self._pending_downloads:
@@ -653,7 +658,7 @@ class InstagramDownloaderBot:
         if not self._ok(uid):
             return
         
-        await self._show_start(u, c)
+        await self._show_start(u, c, edit=False)
     
     async def help_cmd(self, u, c):
         await u.message.reply_text(
@@ -978,8 +983,8 @@ class InstagramDownloaderBot:
         d, uid = q.data, u.effective_user.id
         
         if d == 'b':
-            # Show /start message again instead of "Menu:"
-            await self._show_start(u, c)
+            # Show /start message again (edits the bot's message)
+            await self._show_start(u, c, edit=True)
         elif d == 'c':
             await self._ask_cookies(u, c)
         elif d == 'admin_stats':
