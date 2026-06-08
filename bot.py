@@ -330,7 +330,8 @@ class InstagramDownloaderBot:
             return text
         return text[:max_len - 3] + "..."
     
-    async def _send_media_batch(self, msg, file_paths: List[str], caption: str):
+    async def _send_media_batch(self, chat_id, context, file_paths: List[str], caption: str):
+        """Send media files to Telegram chat, return file IDs"""
         if not file_paths:
             return []
         
@@ -369,7 +370,8 @@ class InstagramDownloaderBot:
                 
                 if media_group:
                     try:
-                        sent = await msg.reply_media_group(
+                        sent = await context.bot.send_media_group(
+                            chat_id=chat_id,
                             media=media_group,
                             write_timeout=60,
                             read_timeout=60,
@@ -383,7 +385,8 @@ class InstagramDownloaderBot:
                         for fp in batch:
                             try:
                                 with open(fp, 'rb') as f:
-                                    s = await msg.reply_photo(photo=f)
+                                    s = await context.bot.send_photo(
+                                        chat_id=chat_id, photo=f)
                                     all_file_ids.append(s.photo[-1].file_id)
                             except Exception as e2:
                                 logger.error(f"Failed to send individual image: {e2}")
@@ -394,7 +397,8 @@ class InstagramDownloaderBot:
         for fp in videos:
             try:
                 with open(fp, 'rb') as f:
-                    s = await msg.reply_video(
+                    s = await context.bot.send_video(
+                        chat_id=chat_id,
                         video=f,
                         caption=self._split_caption(caption) if not images else None,
                         supports_streaming=True,
@@ -407,14 +411,15 @@ class InstagramDownloaderBot:
         for fp in others:
             try:
                 with open(fp, 'rb') as f:
-                    s = await msg.reply_document(document=f)
+                    s = await context.bot.send_document(chat_id=chat_id, document=f)
                     all_file_ids.append(s.document.file_id)
             except Exception as e:
                 logger.error(f"Failed to send document: {e}")
         
         return all_file_ids
     
-    async def _resend_by_file_ids(self, msg, cached_entry: dict):
+    async def _resend_by_file_ids(self, chat_id, context, cached_entry: dict):
+        """Resend media using cached Telegram file IDs to a specific chat"""
         file_ids = cached_entry.get('file_ids', [])
         title = cached_entry.get('title', '')
         
@@ -425,13 +430,17 @@ class InstagramDownloaderBot:
             for i, file_id in enumerate(file_ids):
                 caption = self._split_caption(title) if i == 0 and title else None
                 try:
-                    await msg.reply_video(video=file_id, caption=caption, supports_streaming=True)
+                    await context.bot.send_video(
+                        chat_id=chat_id, video=file_id,
+                        caption=caption, supports_streaming=True)
                 except:
                     try:
-                        await msg.reply_photo(photo=file_id, caption=caption)
+                        await context.bot.send_photo(
+                            chat_id=chat_id, photo=file_id, caption=caption)
                     except:
                         try:
-                            await msg.reply_document(document=file_id, caption=caption)
+                            await context.bot.send_document(
+                                chat_id=chat_id, document=file_id, caption=caption)
                         except:
                             return False
                 await asyncio.sleep(0.3)
@@ -495,6 +504,10 @@ class InstagramDownloaderBot:
         if not self._ok(uid):
             return
         
+        # Skip inline trigger messages
+        if u.message.text and u.message.text.startswith(INLINE_TRIGGER_PREFIX):
+            return
+        
         url = self._extract_url(u.message.text)
         if not url:
             return
@@ -510,13 +523,15 @@ class InstagramDownloaderBot:
                     ]]))
                 return
         
-        await self._auto_download_and_send(uid, url, u.message)
+        await self._auto_download_and_send(uid, url, u.message.chat_id, c)
     
-    async def _auto_download_and_send(self, uid, url, msg):
+    async def _auto_download_and_send(self, uid, url, chat_id, context):
+        """Download media and send to Telegram chat, using cache if available"""
+        
         cached = self.file_id_cache.get(url)
         if cached and cached.get('file_ids'):
-            status = await msg.reply_text("📤 Sending from cache...")
-            success = await self._resend_by_file_ids(msg, cached)
+            status = await context.bot.send_message(chat_id=chat_id, text="📤 Sending from cache...")
+            success = await self._resend_by_file_ids(chat_id, context, cached)
             if success:
                 await status.delete()
                 return
@@ -528,15 +543,15 @@ class InstagramDownloaderBot:
         async with lock:
             cached = self.file_id_cache.get(url)
             if cached and cached.get('file_ids'):
-                status = await msg.reply_text("📤 Sending from cache...")
-                success = await self._resend_by_file_ids(msg, cached)
+                status = await context.bot.send_message(chat_id=chat_id, text="📤 Sending from cache...")
+                success = await self._resend_by_file_ids(chat_id, context, cached)
                 if success:
                     await status.delete()
                     return
                 else:
                     await status.edit_text("⚠️ Cache expired, downloading again...")
             
-            status = await msg.reply_text("⏳ Downloading...")
+            status = await context.bot.send_message(chat_id=chat_id, text="⏳ Downloading...")
             
             try:
                 file_paths, title, username = await asyncio.get_event_loop().run_in_executor(
@@ -554,7 +569,7 @@ class InstagramDownloaderBot:
                 
                 await status.edit_text(f"📤 Uploading {file_count} files ({size_mb:.1f}MB)...")
                 
-                file_ids = await self._send_media_batch(msg, file_paths, caption)
+                file_ids = await self._send_media_batch(chat_id, context, file_paths, caption)
                 
                 if file_ids:
                     self.file_id_cache.add(url, file_ids, title, username)
@@ -578,8 +593,7 @@ class InstagramDownloaderBot:
                     "• Story expired (24h limit)\n"
                     "• Instagram rate limit\n"
                     "• Invalid or expired cookies\n\n"
-                    "⚠️ Re-upload cookies with /cookies if needed",
-                    reply_markup=self._menu(uid))
+                    "⚠️ Re-upload cookies with /cookies if needed")
     
     async def inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.inline_query.query.strip()
@@ -635,6 +649,7 @@ class InstagramDownloaderBot:
         await update.inline_query.answer(results, cache_time=10)
     
     async def handle_inline_trigger(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process messages that start with the inline trigger prefix"""
         msg = update.message
         if not msg or not msg.text:
             return
@@ -655,12 +670,7 @@ class InstagramDownloaderBot:
                 await msg.reply_text("❌ Cookies not available. Please set them in private chat with /cookies.")
                 return
         
-        cached = self.file_id_cache.get(url)
-        if cached and cached.get('file_ids'):
-            await self._resend_by_file_ids(msg, cached)
-            return
-        
-        await self._auto_download_and_send(uid, url, msg)
+        await self._auto_download_and_send(uid, url, msg.chat_id, context)
     
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
@@ -794,6 +804,7 @@ class InstagramDownloaderBot:
             ],
             per_message=False))
         app.add_handler(CallbackQueryHandler(self._router))
+        # Inline trigger handler must be before general text handler
         app.add_handler(MessageHandler(
             filters.TEXT & filters.Regex(f'^{re.escape(INLINE_TRIGGER_PREFIX)}'),
             self.handle_inline_trigger
