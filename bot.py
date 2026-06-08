@@ -233,25 +233,30 @@ class InstagramDownloaderBot:
         dir_name = f"{uid}_{timestamp}"
         return DOWNLOADS_DIR / dir_name
     
+    def _cookie_status_text(self, uid):
+        """Get cookie status text for user"""
+        if uid in self.cookies:
+            return "✅"
+        elif uid in self.cookie_file_ids:
+            return "📎"
+        return "❌"
+    
     def _menu(self, uid):
-        has_cookies = uid in self.cookies
-        has_cookie_id = uid in self.cookie_file_ids
-        cookie_status = "✅" if has_cookies else ("📎" if has_cookie_id else "❌")
-        
-        buttons = [[InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')]]
-        
-        if self._is_admin(uid):
-            cache_count = len(self.file_id_cache._cache)
-            buttons.append([
-                InlineKeyboardButton(f"🍪 {cookie_status} Cookies", callback_data='cookie_status'),
-                InlineKeyboardButton(f"💾 {cache_count} cached", callback_data='cache_info'),
-            ])
-        else:
-            buttons.append([
-                InlineKeyboardButton(f"🍪 {cookie_status} Cookies", callback_data='cookie_status'),
-            ])
-        
-        return InlineKeyboardMarkup(buttons)
+        """Single button menu - just upload/update cookies"""
+        label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data='c')],
+        ])
+    
+    def _admin_menu(self, uid):
+        """Admin menu with extra info"""
+        cache_count = len(self.file_id_cache._cache)
+        cookie_count = len(self.cookie_file_ids)
+        label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data='c')],
+            [InlineKeyboardButton(f"📊 Stats: {cache_count} cached, {cookie_count} users", callback_data='admin_stats')],
+        ])
     
     async def _ensure_cookies_loaded(self, uid: int, context) -> bool:
         if uid in self.cookies:
@@ -345,7 +350,6 @@ class InstagramDownloaderBot:
         return text[:max_len - 3] + "..."
     
     async def _send_media_batch(self, chat_id, context, file_paths: List[str], caption: str):
-        """Send media files to Telegram chat, return file IDs"""
         if not file_paths:
             return []
         
@@ -399,8 +403,7 @@ class InstagramDownloaderBot:
                         for fp in batch:
                             try:
                                 with open(fp, 'rb') as f:
-                                    s = await context.bot.send_photo(
-                                        chat_id=chat_id, photo=f)
+                                    s = await context.bot.send_photo(chat_id=chat_id, photo=f)
                                     all_file_ids.append(s.photo[-1].file_id)
                             except Exception as e2:
                                 logger.error(f"Failed to send individual image: {e2}")
@@ -433,7 +436,6 @@ class InstagramDownloaderBot:
         return all_file_ids
     
     async def _resend_by_file_ids(self, chat_id, context, cached_entry: dict):
-        """Resend media using cached Telegram file IDs to a specific chat"""
         file_ids = cached_entry.get('file_ids', [])
         title = cached_entry.get('title', '')
         
@@ -469,16 +471,9 @@ class InstagramDownloaderBot:
             return
         
         uid = u.effective_user.id
-        has_cookies = uid in self.cookies
-        has_cookie_id = uid in self.cookie_file_ids
+        cookie_status = self._cookie_status_text(uid)
         
-        cookie_info = ""
-        if has_cookies:
-            cookie_info = "\n✅ Cookies active in RAM"
-        elif has_cookie_id:
-            cookie_info = "\n📎 Cookie reference saved - loads automatically"
-        else:
-            cookie_info = "\n❌ No cookies - upload with /cookies"
+        reply_markup = self._admin_menu(uid) if self._is_admin(uid) else self._menu(uid)
         
         await u.message.reply_text(
             f"👋 Welcome {u.effective_user.first_name}!\n\n"
@@ -490,22 +485,19 @@ class InstagramDownloaderBot:
             "• Profiles → Profile picture\n\n"
             "🌐 *Inline Mode:*\n"
             "Type @botname <link> in any chat!\n\n"
-            f"{cookie_info}\n"
-            "🔄 Duplicate links use cached Telegram files\n"
-            f"🗑️ Cache expires after {self.config.STORAGE_DAYS}d.",
+            f"🍪 Cookies: {cookie_status}\n"
+            "🔄 Duplicate links use cache\n"
+            f"🗑️ Cache: {self.config.STORAGE_DAYS}d",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self._menu(uid))
+            reply_markup=reply_markup)
     
     async def help_cmd(self, u, c):
         await u.message.reply_text(
             "📚 Just send an Instagram link to download!\n\n"
             "Commands:\n"
-            "/cookies - Upload Instagram cookies\n"
+            "/cookies - Upload/Update Instagram cookies\n"
             "/start - Main menu\n\n"
-            "🌐 *Inline Mode:* Type @botname <link> in any chat\n"
-            "to share Instagram media instantly.\n\n"
-            "🔒 Bot stores only a file reference to reload\n"
-            "cookies on restart, not the cookies themselves.",
+            "🌐 *Inline Mode:* Type @botname <link> in any chat",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=self._menu(u.effective_user.id))
     
@@ -539,8 +531,6 @@ class InstagramDownloaderBot:
         await self._auto_download_and_send(uid, url, u.message.chat_id, c)
     
     async def _auto_download_and_send(self, uid, url, chat_id, context):
-        """Download media and send to Telegram chat, using cache if available"""
-        
         cached = self.file_id_cache.get(url)
         if cached and cached.get('file_ids'):
             status = await context.bot.send_message(chat_id=chat_id, text="📤 Sending from cache...")
@@ -728,6 +718,13 @@ class InstagramDownloaderBot:
                     "Make sure you're logged into Instagram and export correctly.")
                 return WAITING_FOR_COOKIES
             
+            # Clean up old temp file if exists
+            if uid in self.cookies:
+                try:
+                    os.unlink(self.cookies[uid])
+                except:
+                    pass
+            
             self.cookies[uid] = tmp_path
             self.cookie_file_ids[uid] = doc.file_id
             self._save_cookie_ids()
@@ -735,12 +732,9 @@ class InstagramDownloaderBot:
             await u.message.reply_text(
                 "✅ Cookies saved!\n\n"
                 "🔒 Cookie content stored in RAM only\n"
-                "📎 File reference saved for auto-reload on restart\n"
+                "📎 File reference saved for auto-reload\n"
                 "🔄 Cookies auto-load when bot restarts\n\n"
-                "Now send any Instagram link to download.\n"
-                "Duplicate links will use cached Telegram files.\n\n"
-                "🌐 *Inline Mode:* Type @botname <link> in any chat!",
-                parse_mode=ParseMode.MARKDOWN,
+                "Now send any Instagram link to download.",
                 reply_markup=self._menu(uid))
             return ConversationHandler.END
             
@@ -749,33 +743,7 @@ class InstagramDownloaderBot:
             await u.message.reply_text("❌ Failed to process cookies.")
             return WAITING_FOR_COOKIES
     
-    async def _cookie_status(self, u, c):
-        q = u.callback_query
-        await q.answer()
-        uid = u.effective_user.id
-        
-        in_ram = uid in self.cookies
-        on_disk = uid in self.cookie_file_ids
-        
-        if in_ram:
-            status = "✅ Cookies active in RAM\n"
-        elif on_disk:
-            status = "📎 Cookie reference saved (loads automatically)\n"
-        else:
-            status = "❌ No cookies\n"
-        
-        status += "\n🔒 *How it works:*\n"
-        status += "• Cookie content: RAM only\n"
-        status += "• Bot stores: Only a file reference\n"
-        status += "• File reference works only with this bot\n"
-        status += "• No cookie data written to disk"
-        
-        if self._is_admin(uid):
-            status += f"\n\n📊 *Admin:* {len(self.file_id_cache._cache)} URLs cached"
-        
-        await q.message.edit_text(status, parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(uid))
-    
-    async def _show_cache_info(self, u, c):
+    async def _admin_stats(self, u, c):
         q = u.callback_query
         uid = u.effective_user.id
         
@@ -784,28 +752,26 @@ class InstagramDownloaderBot:
             return
         
         await q.message.edit_text(
-            f"💾 {len(self.file_id_cache._cache)} URLs cached\n"
-            f"🗑️ Cache expires after {self.config.STORAGE_DAYS} days\n"
-            f"🔄 Duplicate links use cached Telegram files\n"
-            f"📎 Cookie references saved for {len(self.cookie_file_ids)} users\n\n"
-            f"ℹ️ Bot stores only Telegram file references,\n"
-            f"not actual cookie data.",
-            reply_markup=self._menu(uid))
+            f"📊 *Bot Statistics*\n\n"
+            f"💾 Cached URLs: {len(self.file_id_cache._cache)}\n"
+            f"👥 Users with cookie refs: {len(self.cookie_file_ids)}\n"
+            f"🍪 Active cookies in RAM: {len(self.cookies)}\n"
+            f"🗑️ Storage days: {self.config.STORAGE_DAYS}\n"
+            f"🌐 Inline mode: Enabled",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self._admin_menu(uid))
     
     async def _router(self, u, c):
         q = u.callback_query
         await q.answer()
         d, uid = q.data, u.effective_user.id
         
-        routes = {
-            'b': lambda: q.message.edit_text("📋 Menu:", reply_markup=self._menu(uid)),
-            'c': lambda: self._ask_cookies(u, c),
-            'cookie_status': lambda: self._cookie_status(u, c),
-            'cache_info': lambda: self._show_cache_info(u, c),
-        }
-        
-        if d in routes:
-            await routes[d]()
+        if d == 'b':
+            await q.message.edit_text("📋 Menu:", reply_markup=self._menu(uid))
+        elif d == 'c':
+            await self._ask_cookies(u, c)
+        elif d == 'admin_stats':
+            await self._admin_stats(u, c)
     
     def run(self):
         app = Application.builder().token(self.config.BOT_TOKEN).build()
