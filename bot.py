@@ -3,7 +3,7 @@
 Instagram Downloader Telegram Bot
 Uses gallery-dl for reliable Instagram downloads
 Auto-downloads and sends media, caches Telegram file IDs to prevent re-uploads
-Supports inline mode - use @botname <link> in any chat
+Supports inline mode and group chats
 """
 
 import os
@@ -142,6 +142,7 @@ class InstagramDownloaderBot:
         self.cookies: Dict[int, str] = {}
         self.cookie_file_ids: Dict[int, str] = {}
         self._pending_downloads: Dict[str, dict] = {}
+        self._allowed_groups: Dict[int, bool] = {}  # Cache group permission checks
         
         self.file_id_cache = FileIDCache(self.config.STORAGE_DAYS)
         self._download_locks: Dict[str, asyncio.Lock] = {}
@@ -197,11 +198,12 @@ class InstagramDownloaderBot:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         self.file_id_cache.cleanup_expired()
-        # Clean up old pending downloads
         cutoff_ts = time.time() - (self.config.STORAGE_DAYS * 86400)
         expired = [k for k, v in self._pending_downloads.items() if v.get('started_at', 0) < cutoff_ts]
         for k in expired:
             del self._pending_downloads[k]
+        # Clear group permission cache periodically
+        self._allowed_groups.clear()
     
     def _ok(self, uid):
         return not self.config.get_whitelist() or uid in self.config.get_whitelist()
@@ -211,6 +213,28 @@ class InstagramDownloaderBot:
         if not admins:
             return False
         return uid in admins
+    
+    async def _is_group_allowed(self, chat_id, context) -> bool:
+        """Check if group has any whitelisted admin/owner"""
+        whitelist = self.config.get_whitelist()
+        if not whitelist:
+            return True  # No whitelist = all groups allowed
+        
+        # Check cache first
+        if chat_id in self._allowed_groups:
+            return self._allowed_groups[chat_id]
+        
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            for admin in admins:
+                if admin.user.id in whitelist:
+                    self._allowed_groups[chat_id] = True
+                    return True
+            self._allowed_groups[chat_id] = False
+            return False
+        except Exception as e:
+            logger.error(f"Failed to check group admins for {chat_id}: {e}")
+            return False
     
     def _extract_url(self, text):
         m = INSTAGRAM_RE.search(text)
@@ -351,7 +375,7 @@ class InstagramDownloaderBot:
             return text
         return text[:max_len - 3] + "..."
     
-    async def _send_media_batch(self, chat_id, context, file_paths: List[str], caption: str):
+    async def _send_media_batch(self, chat_id, context, file_paths: List[str], caption: str, reply_to_message_id: int = None):
         if not file_paths:
             return []
         
@@ -393,6 +417,7 @@ class InstagramDownloaderBot:
                         sent = await context.bot.send_media_group(
                             chat_id=chat_id,
                             media=media_group,
+                            reply_to_message_id=reply_to_message_id,
                             write_timeout=60,
                             read_timeout=60,
                         )
@@ -405,7 +430,9 @@ class InstagramDownloaderBot:
                         for fp in batch:
                             try:
                                 with open(fp, 'rb') as f:
-                                    s = await context.bot.send_photo(chat_id=chat_id, photo=f)
+                                    s = await context.bot.send_photo(
+                                        chat_id=chat_id, photo=f,
+                                        reply_to_message_id=reply_to_message_id)
                                     all_file_ids.append(s.photo[-1].file_id)
                             except Exception as e2:
                                 logger.error(f"Failed to send individual image: {e2}")
@@ -421,6 +448,7 @@ class InstagramDownloaderBot:
                         video=f,
                         caption=self._split_caption(caption) if not images else None,
                         supports_streaming=True,
+                        reply_to_message_id=reply_to_message_id,
                         write_timeout=60,
                     )
                     all_file_ids.append(s.video.file_id)
@@ -430,14 +458,16 @@ class InstagramDownloaderBot:
         for fp in others:
             try:
                 with open(fp, 'rb') as f:
-                    s = await context.bot.send_document(chat_id=chat_id, document=f)
+                    s = await context.bot.send_document(
+                        chat_id=chat_id, document=f,
+                        reply_to_message_id=reply_to_message_id)
                     all_file_ids.append(s.document.file_id)
             except Exception as e:
                 logger.error(f"Failed to send document: {e}")
         
         return all_file_ids
     
-    async def _resend_by_file_ids(self, chat_id, context, cached_entry: dict):
+    async def _resend_by_file_ids(self, chat_id, context, cached_entry: dict, reply_to_message_id: int = None):
         file_ids = cached_entry.get('file_ids', [])
         title = cached_entry.get('title', '')
         
@@ -450,15 +480,18 @@ class InstagramDownloaderBot:
                 try:
                     await context.bot.send_video(
                         chat_id=chat_id, video=file_id,
-                        caption=caption, supports_streaming=True)
+                        caption=caption, supports_streaming=True,
+                        reply_to_message_id=reply_to_message_id)
                 except:
                     try:
                         await context.bot.send_photo(
-                            chat_id=chat_id, photo=file_id, caption=caption)
+                            chat_id=chat_id, photo=file_id, caption=caption,
+                            reply_to_message_id=reply_to_message_id)
                     except:
                         try:
                             await context.bot.send_document(
-                                chat_id=chat_id, document=file_id, caption=caption)
+                                chat_id=chat_id, document=file_id, caption=caption,
+                                reply_to_message_id=reply_to_message_id)
                         except:
                             return False
                 await asyncio.sleep(0.3)
@@ -610,6 +643,8 @@ class InstagramDownloaderBot:
             "• Profiles → Profile picture\n\n"
             "🌐 *Inline Mode:*\n"
             "Type @botname <link> in any chat!\n\n"
+            "👥 *Groups:* Works in groups where\n"
+            "a whitelisted user is admin\n\n"
             f"🍪 Cookies: {cookie_status}\n"
             "🔄 Duplicate links use cache\n"
             f"🗑️ Cache: {self.config.STORAGE_DAYS}d",
@@ -622,7 +657,9 @@ class InstagramDownloaderBot:
             "Commands:\n"
             "/cookies - Upload/Update Instagram cookies\n"
             "/start - Main menu\n\n"
-            "🌐 *Inline Mode:* Type @botname <link> in any chat",
+            "🌐 *Inline Mode:* Type @botname <link> in any chat\n"
+            "👥 *Groups:* Send link in group, bot replies with media\n"
+            "(requires you have cookies set up)",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=self._menu(u.effective_user.id))
     
@@ -630,7 +667,8 @@ class InstagramDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
     
-    async def on_msg(self, u, c):
+    async def on_private_msg(self, u, c):
+        """Handle private messages"""
         uid = u.effective_user.id
         if not self._ok(uid):
             return
@@ -642,7 +680,6 @@ class InstagramDownloaderBot:
         if uid not in self.cookies:
             loaded = await self._ensure_cookies_loaded(uid, c)
             if not loaded:
-                # Check if URL is cached - if so, send anyway
                 cached = self.file_id_cache.get(url)
                 if cached and cached.get('file_ids'):
                     await self._resend_by_file_ids(u.message.chat_id, c, cached)
@@ -658,39 +695,60 @@ class InstagramDownloaderBot:
         
         await self._auto_download_and_send(uid, url, u.message.chat_id, c)
     
-    async def _auto_download_and_send(self, uid, url, chat_id, context):
+    async def on_group_msg(self, u, c):
+        """Handle group messages - silent if not allowed or no cookies"""
+        uid = u.effective_user.id
+        chat_id = u.effective_chat.id
+        
+        # Check if group is allowed (has whitelisted admin)
+        if not await self._is_group_allowed(chat_id, c):
+            return
+        
+        # Must have cookies
+        if uid not in self.cookies:
+            loaded = await self._ensure_cookies_loaded(uid, c)
+            if not loaded:
+                return  # Silent
+        
+        url = self._extract_url(u.message.text)
+        if not url:
+            return
+        
+        message_id = u.message.message_id
+        
+        # Check cache first
         cached = self.file_id_cache.get(url)
         if cached and cached.get('file_ids'):
-            status = await context.bot.send_message(chat_id=chat_id, text="📤 Sending from cache...")
-            success = await self._resend_by_file_ids(chat_id, context, cached)
+            await self._resend_by_file_ids(chat_id, c, cached, reply_to_message_id=message_id)
+            return
+        
+        # Download with status
+        status = await u.message.reply_text("⏳ Downloading...")
+        try:
+            await self._auto_download_and_send(uid, url, chat_id, c, reply_to_message_id=message_id)
+        finally:
+            await status.delete()
+    
+    async def _auto_download_and_send(self, uid, url, chat_id, context, reply_to_message_id: int = None):
+        cached = self.file_id_cache.get(url)
+        if cached and cached.get('file_ids'):
+            success = await self._resend_by_file_ids(chat_id, context, cached, reply_to_message_id)
             if success:
-                await status.delete()
                 return
-            else:
-                await status.edit_text("⚠️ Cache expired, downloading again...")
         
         lock = self._get_download_lock(url)
         
         async with lock:
             cached = self.file_id_cache.get(url)
             if cached and cached.get('file_ids'):
-                status = await context.bot.send_message(chat_id=chat_id, text="📤 Sending from cache...")
-                success = await self._resend_by_file_ids(chat_id, context, cached)
-                if success:
-                    await status.delete()
-                    return
-                else:
-                    await status.edit_text("⚠️ Cache expired, downloading again...")
-            
-            status = await context.bot.send_message(chat_id=chat_id, text="⏳ Downloading...")
+                await self._resend_by_file_ids(chat_id, context, cached, reply_to_message_id)
+                return
             
             try:
                 file_paths, title, username = await asyncio.get_event_loop().run_in_executor(
                     None, self._sync_download, uid, url)
                 
                 file_count = len(file_paths)
-                total_size = sum(Path(fp).stat().st_size for fp in file_paths)
-                size_mb = total_size / 1024 / 1024
                 
                 caption = title
                 if username:
@@ -698,14 +756,10 @@ class InstagramDownloaderBot:
                 if file_count > 1:
                     caption += f"\n\n📸 {file_count} images"
                 
-                await status.edit_text(f"📤 Uploading {file_count} files ({size_mb:.1f}MB)...")
-                
-                file_ids = await self._send_media_batch(chat_id, context, file_paths, caption)
+                file_ids = await self._send_media_batch(chat_id, context, file_paths, caption, reply_to_message_id)
                 
                 if file_ids:
                     self.file_id_cache.add(url, file_ids, title, username)
-                
-                await status.delete()
                 
                 logger.info(f"Sent {len(file_ids)} files for {url[:80]}")
                 
@@ -717,14 +771,11 @@ class InstagramDownloaderBot:
                 
             except Exception as e:
                 logger.error(f"Download error: {str(e)[:200]}")
-                await status.edit_text(
-                    f"❌ Failed: {str(e)[:200]}\n\n"
-                    "Possible reasons:\n"
-                    "• Private account (must follow)\n"
-                    "• Story expired (24h limit)\n"
-                    "• Instagram rate limit\n"
-                    "• Invalid or expired cookies\n\n"
-                    "⚠️ Re-upload cookies with /cookies if needed")
+                # Silent in groups, show error in private
+                if reply_to_message_id is None:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"❌ Failed: {str(e)[:200]}\n\n⚠️ Re-upload cookies with /cookies if needed")
     
     async def inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.inline_query.query.strip()
@@ -750,7 +801,6 @@ class InstagramDownloaderBot:
         if cached:
             file_ids = cached.get('file_ids', [])
             title = cached.get('title', 'Instagram Media')
-            username = cached.get('username', '')
             
             start_param = f"dl_{url.replace('/', '_')[:50]}"
             
@@ -771,7 +821,6 @@ class InstagramDownloaderBot:
             await update.inline_query.answer(results, cache_time=30)
             return
         
-        # Not cached - check if any user has cookies
         if not self.cookies and not self.cookie_file_ids:
             results = [
                 InlineQueryResultArticle(
@@ -786,7 +835,6 @@ class InstagramDownloaderBot:
             await update.inline_query.answer(results, cache_time=10)
             return
         
-        # Start background download
         download_id = str(uuid4())[:8]
         cookie_uid = next((u for u in self.cookies if self.cookies[u]), None)
         if not cookie_uid:
@@ -891,7 +939,8 @@ class InstagramDownloaderBot:
                 "🔒 Cookie content stored in RAM only\n"
                 "📎 File reference saved for auto-reload\n"
                 "🔄 Cookies auto-load when bot restarts\n\n"
-                "Now send any Instagram link to download.",
+                "Now send any Instagram link to download.\n"
+                "Works in private chat and groups!",
                 reply_markup=self._menu(uid))
             return ConversationHandler.END
             
@@ -914,8 +963,10 @@ class InstagramDownloaderBot:
             f"👥 Users with cookie refs: {len(self.cookie_file_ids)}\n"
             f"🍪 Active cookies in RAM: {len(self.cookies)}\n"
             f"⏳ Pending downloads: {len(self._pending_downloads)}\n"
+            f"🏠 Cached group permissions: {len(self._allowed_groups)}\n"
             f"🗑️ Storage days: {self.config.STORAGE_DAYS}\n"
-            f"🌐 Inline mode: Enabled",
+            f"🌐 Inline mode: Enabled\n"
+            f"👥 Group mode: Enabled",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=self._admin_menu(uid))
     
@@ -944,7 +995,6 @@ class InstagramDownloaderBot:
             
             if status == 'ready':
                 await q.message.edit_text("✅ Download ready! Sending...")
-                # Re-trigger start with the download link
                 c.args = [f"dl_{download_ref}"]
                 await self.start_cmd(u, c)
                 return
@@ -987,10 +1037,13 @@ class InstagramDownloaderBot:
             ],
             per_message=False))
         app.add_handler(CallbackQueryHandler(self._router))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, self.on_group_msg))
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, self.on_private_msg))
         app.add_handler(InlineQueryHandler(self.inline_query))
         
-        logger.info(f"Instagram Bot starting (inline mode, cookie refs: {len(self.cookie_file_ids)}, cache: {len(self.file_id_cache._cache)})...")
+        logger.info(f"Instagram Bot starting (groups, inline, cookie refs: {len(self.cookie_file_ids)}, cache: {len(self.file_id_cache._cache)})...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
