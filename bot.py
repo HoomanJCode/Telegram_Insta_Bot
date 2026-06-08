@@ -24,8 +24,7 @@ from uuid import uuid4
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto,
-    InlineQueryResultArticle, InputTextMessageContent,
-    InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo
+    InlineQueryResultArticle, InputTextMessageContent
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -281,6 +280,37 @@ class InstagramDownloaderBot:
             [InlineKeyboardButton(label, callback_data='c')],
             [InlineKeyboardButton(f"📊 Stats: {cache_count} cached, {cookie_count} users", callback_data='admin_stats')],
         ])
+    
+    async def _show_start(self, update, context):
+        """Show the /start message (works for both commands and callback queries)"""
+        if update.callback_query:
+            uid = update.callback_query.from_user.id
+            msg = update.callback_query.message
+        else:
+            uid = update.effective_user.id
+            msg = update.message
+        
+        cookie_status = self._cookie_status_text(uid)
+        reply_markup = self._admin_menu(uid) if self._is_admin(uid) else self._menu(uid)
+        bot_username = context.bot.username
+        
+        await msg.edit_text(
+            f"👋 Welcome {update.effective_user.first_name}!\n\n"
+            "📱 *Instagram Downloader Bot*\n\n"
+            "💡 Just send an Instagram link!\n"
+            "• Posts → All images/videos\n"
+            "• Reels → Video\n"
+            "• Stories → Images/videos\n"
+            "• Profiles → Profile picture\n\n"
+            "🌐 *Inline Mode:*\n"
+            f"Type @{bot_username} <link> in any chat!\n\n"
+            "👥 *Groups:* Works in groups where\n"
+            "a whitelisted user is admin\n\n"
+            f"🍪 Cookies: {cookie_status}\n"
+            "🔄 Duplicate links use cache\n"
+            f"🗑️ Cache: {self.config.STORAGE_DAYS}d",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup)
     
     async def _ensure_cookies_loaded(self, uid: int, context) -> bool:
         if uid in self.cookies:
@@ -623,26 +653,7 @@ class InstagramDownloaderBot:
         if not self._ok(uid):
             return
         
-        cookie_status = self._cookie_status_text(uid)
-        reply_markup = self._admin_menu(uid) if self._is_admin(uid) else self._menu(uid)
-        
-        await u.message.reply_text(
-            f"👋 Welcome {u.effective_user.first_name}!\n\n"
-            "📱 *Instagram Downloader Bot*\n\n"
-            "💡 Just send an Instagram link!\n"
-            "• Posts → All images/videos\n"
-            "• Reels → Video\n"
-            "• Stories → Images/videos\n"
-            "• Profiles → Profile picture\n\n"
-            "🌐 *Inline Mode:*\n"
-            "Type @botname <link> in any chat!\n\n"
-            "👥 *Groups:* Works in groups where\n"
-            "a whitelisted user is admin\n\n"
-            f"🍪 Cookies: {cookie_status}\n"
-            "🔄 Duplicate links use cache\n"
-            f"🗑️ Cache: {self.config.STORAGE_DAYS}d",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup)
+        await self._show_start(u, c)
     
     async def help_cmd(self, u, c):
         await u.message.reply_text(
@@ -650,7 +661,7 @@ class InstagramDownloaderBot:
             "Commands:\n"
             "/cookies - Upload/Update Instagram cookies\n"
             "/start - Main menu\n\n"
-            "🌐 *Inline Mode:* Type @botname <link> in any chat\n"
+            f"🌐 *Inline Mode:* Type @{c.bot.username} <link> in any chat\n"
             "👥 *Groups:* Send link in group, bot replies with media\n"
             "(requires you have cookies set up)",
             parse_mode=ParseMode.MARKDOWN,
@@ -765,6 +776,7 @@ class InstagramDownloaderBot:
     
     async def inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.inline_query.query.strip()
+        bot_username = context.bot.username
         
         url = self._extract_url(query)
         if not url:
@@ -782,7 +794,6 @@ class InstagramDownloaderBot:
             return
         
         cached = self.file_id_cache.get(url)
-        bot_username = context.bot.username
         
         if cached:
             file_ids = cached.get('file_ids', [])
@@ -793,42 +804,22 @@ class InstagramDownloaderBot:
             if username:
                 caption = f"📱 @{username}\n{title}"
             
-            results = []
-            for i, fid in enumerate(file_ids[:10]):
-                cap = caption if i == 0 else None
-                results.append(
-                    InlineQueryResultCachedVideo(
-                        id=str(uuid4()),
-                        video_file_id=fid,
-                        title=title[:50],
-                        caption=cap,
-                    )
-                )
-                results.append(
-                    InlineQueryResultCachedPhoto(
-                        id=str(uuid4()),
-                        photo_file_id=fid,
-                        title=title[:50],
-                        caption=cap,
-                    )
-                )
-            
             start_param = f"dl_{url.replace('/', '_')[:50]}"
-            results.append(
+            
+            results = [
                 InlineQueryResultArticle(
                     id=str(uuid4()),
-                    title=f"📱 {title[:50]} (all {len(file_ids)} files)",
-                    description="Tap to get all files in bot",
+                    title=f"📱 {title[:50]}",
+                    description=f"✅ Ready ({len(file_ids)} files) - Tap to get in bot",
                     input_message_content=InputTextMessageContent(
                         f"📱 Instagram media ready!\n👉 [Open in bot](tg://resolve?domain={bot_username}&start={start_param})",
                         parse_mode=ParseMode.MARKDOWN
                     ),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Get All Files", url=f"tg://resolve?domain={bot_username}&start={start_param}")
+                        InlineKeyboardButton("📥 Get Media", url=f"tg://resolve?domain={bot_username}&start={start_param}")
                     ]])
                 )
-            )
-            
+            ]
             await update.inline_query.answer(results, cache_time=30)
             return
         
@@ -987,7 +978,8 @@ class InstagramDownloaderBot:
         d, uid = q.data, u.effective_user.id
         
         if d == 'b':
-            await q.message.edit_text("📋 Menu:", reply_markup=self._menu(uid))
+            # Show /start message again instead of "Menu:"
+            await self._show_start(u, c)
         elif d == 'c':
             await self._ask_cookies(u, c)
         elif d == 'admin_stats':
