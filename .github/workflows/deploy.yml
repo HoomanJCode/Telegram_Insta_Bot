@@ -33,6 +33,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WHITELIST_USERS: ${{ secrets.WHITELIST_USERS || '' }}
+          ADMIN_USERS: ${{ secrets.ADMIN_USERS || '' }}
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
         run: |
@@ -74,6 +75,7 @@ jobs:
           cat > "$PROJECT_DIR/.env" << EOF
           BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
           WHITELIST_USERS=WHITELIST_USERS_PLACEHOLDER
+          ADMIN_USERS=ADMIN_USERS_PLACEHOLDER
           STORAGE_DAYS=STORAGE_DAYS_PLACEHOLDER
           MAX_TELEGRAM_FILE_SIZE=MAX_TELEGRAM_SIZE_PLACEHOLDER
           EOF
@@ -91,7 +93,7 @@ jobs:
           $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
           $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
           
-          mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
+          mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/downloads"
           mkdir -p /var/log/$SERVICE_NAME
           
           echo "🧪 Testing configuration..."
@@ -101,6 +103,7 @@ jobs:
           c = Config()
           print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
           print('Storage:', c.STORAGE_DAYS)
+          print('Admins:', c.get_admins())
           "
           
           echo "🔧 Creating service..."
@@ -150,6 +153,7 @@ jobs:
           sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
           sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
           sed -i "s|WHITELIST_USERS_PLACEHOLDER|${WHITELIST_USERS}|g" /tmp/deploy_script.sh
+          sed -i "s|ADMIN_USERS_PLACEHOLDER|${ADMIN_USERS}|g" /tmp/deploy_script.sh
           sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
           sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
           
