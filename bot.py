@@ -568,41 +568,45 @@ class InstagramDownloaderBot:
         uid = u.effective_user.id
         args = c.args
         
+        logger.info(f"Start command from {uid}, args: {args}")
+        
         if args:
             deep_link = args[0]
+            logger.info(f"Deep link: {deep_link}")
             
             if deep_link.startswith('dl_'):
                 download_ref = deep_link[3:]
+                logger.info(f"Looking for download ref: {download_ref}")
                 
-                cached = None
-                for url_key in self.file_id_cache._cache:
-                    if url_key.replace('/', '_')[:50] == download_ref:
-                        cached = self.file_id_cache.get(url_key)
-                        break
-                
-                if cached:
-                    file_ids = cached.get('file_ids', [])
-                    title = cached.get('title', 'Instagram Media')
-                    status_msg = await u.message.reply_text(f"📤 Sending {len(file_ids)} files...")
-                    
-                    for i, fid in enumerate(file_ids):
-                        caption = title if i == 0 else None
-                        try:
-                            await c.bot.send_video(chat_id=uid, video=fid, caption=caption, supports_streaming=True)
-                        except:
-                            try:
-                                await c.bot.send_photo(chat_id=uid, photo=fid, caption=caption)
-                            except:
-                                await c.bot.send_document(chat_id=uid, document=fid, caption=caption)
-                        await asyncio.sleep(0.3)
-                    await status_msg.delete()
-                    return
-                
+                # Check pending downloads (includes 'cached' status entries)
                 if download_ref in self._pending_downloads:
                     pending = self._pending_downloads[download_ref]
                     status = pending.get('status', 'unknown')
+                    logger.info(f"Found pending download: {status}")
                     
-                    if status == 'ready':
+                    if status == 'cached':
+                        url = pending.get('url', '')
+                        cached = self.file_id_cache.get(url)
+                        if cached:
+                            file_ids = cached.get('file_ids', [])
+                            title = cached.get('title', 'Instagram Media')
+                            status_msg = await u.message.reply_text(f"📤 Sending {len(file_ids)} files...")
+                            
+                            for i, fid in enumerate(file_ids):
+                                caption = title if i == 0 else None
+                                try:
+                                    await c.bot.send_video(chat_id=uid, video=fid, caption=caption, supports_streaming=True)
+                                except:
+                                    try:
+                                        await c.bot.send_photo(chat_id=uid, photo=fid, caption=caption)
+                                    except:
+                                        await c.bot.send_document(chat_id=uid, document=fid, caption=caption)
+                                await asyncio.sleep(0.3)
+                            await status_msg.delete()
+                            del self._pending_downloads[download_ref]
+                            return
+                    
+                    elif status == 'ready':
                         file_paths = pending.get('file_paths', [])
                         title = pending.get('title', 'Instagram Media')
                         username = pending.get('username', '')
@@ -803,10 +807,17 @@ class InstagramDownloaderBot:
         if cached:
             file_ids = cached.get('file_ids', [])
             title = cached.get('title', 'Instagram Media')
-            username = cached.get('username', '')
             
-            start_param = f"dl_{url.replace('/', '_')[:50]}"
-            bot_link = f"https://t.me/{bot_username}?start={start_param}"
+            # Use short unique ID for cached content deep link
+            download_id = str(uuid4())[:8]
+            self._pending_downloads[download_id] = {
+                'uid': 0,
+                'url': url,
+                'status': 'cached',
+                'started_at': time.time(),
+            }
+            
+            bot_link = f"https://t.me/{bot_username}?start=dl_{download_id}"
             
             results = [
                 InlineQueryResultArticle(
@@ -814,7 +825,7 @@ class InstagramDownloaderBot:
                     title=f"📱 {title[:50]}",
                     description=f"✅ Ready ({len(file_ids)} files) - Tap to get in bot",
                     input_message_content=InputTextMessageContent(
-                        f"📱 [Instagram Media]({bot_link})",
+                        f"📱 [Get Instagram Media]({bot_link})",
                         parse_mode=ParseMode.MARKDOWN
                     ),
                     reply_markup=InlineKeyboardMarkup([[
@@ -854,8 +865,7 @@ class InstagramDownloaderBot:
             
             asyncio.create_task(self._background_download(download_id, cookie_uid, url))
             
-            start_param = f"dl_{download_id}"
-            bot_link = f"https://t.me/{bot_username}?start={start_param}"
+            bot_link = f"https://t.me/{bot_username}?start=dl_{download_id}"
             
             results = [
                 InlineQueryResultArticle(
@@ -884,7 +894,7 @@ class InstagramDownloaderBot:
                 )
             ]
             await update.inline_query.answer(results, cache_time=10)
-            
+    
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
             return ConversationHandler.END
@@ -981,7 +991,6 @@ class InstagramDownloaderBot:
         d, uid = q.data, u.effective_user.id
         
         if d == 'b':
-            # Show /start message again (edits the bot's message)
             await self._show_start(u, c, edit=True)
         elif d == 'c':
             await self._ask_cookies(u, c)
@@ -998,8 +1007,8 @@ class InstagramDownloaderBot:
             pending = self._pending_downloads[download_ref]
             status = pending.get('status', 'unknown')
             
-            if status == 'ready':
-                await q.message.edit_text("✅ Download ready! Sending...")
+            if status in ('ready', 'cached'):
+                await q.message.edit_text("✅ Sending media...")
                 c.args = [f"dl_{download_ref}"]
                 await self.start_cmd(u, c)
                 return
