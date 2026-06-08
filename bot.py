@@ -68,7 +68,6 @@ INSTAGRAM_RE = re.compile(
 
 MAX_IMAGES_PER_MEDIA_GROUP = 10
 MAX_CAPTION_LENGTH = 1024
-INLINE_TRIGGER_PREFIX = "📥 "
 
 # ---------------------------------------------------------------------------
 # File ID Cache
@@ -142,6 +141,7 @@ class InstagramDownloaderBot:
         
         self.cookies: Dict[int, str] = {}
         self.cookie_file_ids: Dict[int, str] = {}
+        self._pending_downloads: Dict[str, dict] = {}
         
         self.file_id_cache = FileIDCache(self.config.STORAGE_DAYS)
         self._download_locks: Dict[str, asyncio.Lock] = {}
@@ -197,6 +197,11 @@ class InstagramDownloaderBot:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         self.file_id_cache.cleanup_expired()
+        # Clean up old pending downloads
+        cutoff_ts = time.time() - (self.config.STORAGE_DAYS * 86400)
+        expired = [k for k, v in self._pending_downloads.items() if v.get('started_at', 0) < cutoff_ts]
+        for k in expired:
+            del self._pending_downloads[k]
     
     def _ok(self, uid):
         return not self.config.get_whitelist() or uid in self.config.get_whitelist()
@@ -234,7 +239,6 @@ class InstagramDownloaderBot:
         return DOWNLOADS_DIR / dir_name
     
     def _cookie_status_text(self, uid):
-        """Get cookie status text for user"""
         if uid in self.cookies:
             return "✅"
         elif uid in self.cookie_file_ids:
@@ -242,14 +246,12 @@ class InstagramDownloaderBot:
         return "❌"
     
     def _menu(self, uid):
-        """Single button menu - just upload/update cookies"""
         label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
         return InlineKeyboardMarkup([
             [InlineKeyboardButton(label, callback_data='c')],
         ])
     
     def _admin_menu(self, uid):
-        """Admin menu with extra info"""
         cache_count = len(self.file_id_cache._cache)
         cookie_count = len(self.cookie_file_ids)
         label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
@@ -465,14 +467,137 @@ class InstagramDownloaderBot:
             logger.error(f"Resend error: {e}")
             return False
     
+    async def _background_download(self, download_id: str, uid: int, url: str):
+        """Download in background and update status"""
+        try:
+            self._pending_downloads[download_id]['status'] = 'downloading'
+            
+            if uid not in self.cookies:
+                self._pending_downloads[download_id]['status'] = 'failed'
+                self._pending_downloads[download_id]['error'] = 'Cookies not loaded'
+                return
+            
+            file_paths, title, username = await asyncio.get_event_loop().run_in_executor(
+                None, self._sync_download, uid, url)
+            
+            if not file_paths:
+                self._pending_downloads[download_id]['status'] = 'failed'
+                self._pending_downloads[download_id]['error'] = 'No media found'
+                return
+            
+            total_size = sum(Path(fp).stat().st_size for fp in file_paths)
+            
+            self._pending_downloads[download_id]['status'] = 'ready'
+            self._pending_downloads[download_id]['file_paths'] = file_paths
+            self._pending_downloads[download_id]['title'] = title
+            self._pending_downloads[download_id]['username'] = username
+            self._pending_downloads[download_id]['total_size'] = total_size
+            self._pending_downloads[download_id]['url'] = url
+            
+        except Exception as e:
+            logger.error(f"Background download failed: {e}")
+            self._pending_downloads[download_id]['status'] = 'failed'
+            self._pending_downloads[download_id]['error'] = str(e)[:200]
+    
     # --- Handlers ---
     async def start_cmd(self, u, c):
-        if not self._ok(u.effective_user.id):
+        uid = u.effective_user.id
+        args = c.args
+        
+        # Handle deep links - no whitelist check needed
+        if args:
+            deep_link = args[0]
+            
+            if deep_link.startswith('dl_'):
+                download_ref = deep_link[3:]
+                
+                # Check if it's a URL-based reference (cached content)
+                cached = None
+                for url_key in self.file_id_cache._cache:
+                    if url_key.replace('/', '_')[:50] == download_ref:
+                        cached = self.file_id_cache.get(url_key)
+                        break
+                
+                if cached:
+                    file_ids = cached.get('file_ids', [])
+                    title = cached.get('title', 'Instagram Media')
+                    await u.message.reply_text(f"📤 Sending {len(file_ids)} files...")
+                    
+                    for i, fid in enumerate(file_ids):
+                        caption = title if i == 0 else None
+                        try:
+                            await c.bot.send_video(chat_id=uid, video=fid, caption=caption, supports_streaming=True)
+                        except:
+                            try:
+                                await c.bot.send_photo(chat_id=uid, photo=fid, caption=caption)
+                            except:
+                                await c.bot.send_document(chat_id=uid, document=fid, caption=caption)
+                        await asyncio.sleep(0.3)
+                    return
+                
+                # Check if it's a pending download
+                if download_ref in self._pending_downloads:
+                    pending = self._pending_downloads[download_ref]
+                    status = pending.get('status', 'unknown')
+                    
+                    if status == 'ready':
+                        file_paths = pending.get('file_paths', [])
+                        title = pending.get('title', 'Instagram Media')
+                        username = pending.get('username', '')
+                        url = pending.get('url', '')
+                        
+                        file_count = len(file_paths)
+                        status_msg = await u.message.reply_text(f"📤 Uploading {file_count} files...")
+                        
+                        caption = title
+                        if username:
+                            caption = f"📱 @{username}\n{title}"
+                        
+                        file_ids = await self._send_media_batch(uid, c, file_paths, caption)
+                        
+                        if file_ids and url:
+                            self.file_id_cache.add(url, file_ids, title, username)
+                        
+                        await status_msg.delete()
+                        
+                        for fp in file_paths:
+                            Path(fp).unlink(missing_ok=True)
+                        
+                        del self._pending_downloads[download_ref]
+                        return
+                    
+                    elif status in ('pending', 'downloading'):
+                        elapsed = int(time.time() - pending.get('started_at', time.time()))
+                        await u.message.reply_text(
+                            f"⏳ Download in progress ({elapsed}s)...\n"
+                            f"Tap the link again to check.",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("🔄 Check Again", callback_data=f"check_dl_{download_ref}")
+                            ]])
+                        )
+                        return
+                    
+                    elif status == 'failed':
+                        error = pending.get('error', 'Unknown error')
+                        await u.message.reply_text(f"❌ Download failed: {error}")
+                        del self._pending_downloads[download_ref]
+                        return
+                
+                await u.message.reply_text("❌ Download not found. It may have expired.")
+                return
+            
+            elif deep_link == 'cookies':
+                if not self._ok(uid):
+                    await u.message.reply_text("❌ Not authorized.")
+                    return
+                await self._ask_cookies(u, c)
+                return
+        
+        # Normal start - whitelist check
+        if not self._ok(uid):
             return
         
-        uid = u.effective_user.id
         cookie_status = self._cookie_status_text(uid)
-        
         reply_markup = self._admin_menu(uid) if self._is_admin(uid) else self._menu(uid)
         
         await u.message.reply_text(
@@ -510,9 +635,6 @@ class InstagramDownloaderBot:
         if not self._ok(uid):
             return
         
-        if u.message.text and u.message.text.startswith(INLINE_TRIGGER_PREFIX):
-            return
-        
         url = self._extract_url(u.message.text)
         if not url:
             return
@@ -520,6 +642,12 @@ class InstagramDownloaderBot:
         if uid not in self.cookies:
             loaded = await self._ensure_cookies_loaded(uid, c)
             if not loaded:
+                # Check if URL is cached - if so, send anyway
+                cached = self.file_id_cache.get(url)
+                if cached and cached.get('file_ids'):
+                    await self._resend_by_file_ids(u.message.chat_id, c, cached)
+                    return
+                
                 await u.message.reply_text(
                     "❌ Cookies not available.\n"
                     "Use /cookies to upload your Instagram cookies.",
@@ -600,11 +728,6 @@ class InstagramDownloaderBot:
     
     async def inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.inline_query.query.strip()
-        uid = update.inline_query.from_user.id
-        
-        if not self._ok(uid):
-            await update.inline_query.answer([], switch_pm_text="❌ Not authorized", switch_pm_parameter="start")
-            return
         
         url = self._extract_url(query)
         if not url:
@@ -622,57 +745,92 @@ class InstagramDownloaderBot:
             return
         
         cached = self.file_id_cache.get(url)
+        bot_username = context.bot.username
+        
         if cached:
             file_ids = cached.get('file_ids', [])
             title = cached.get('title', 'Instagram Media')
+            username = cached.get('username', '')
+            
+            start_param = f"dl_{url.replace('/', '_')[:50]}"
             
             results = [
                 InlineQueryResultArticle(
                     id=str(uuid4()),
                     title=f"📱 {title[:50]}",
-                    description=f"Tap to send from cache ({len(file_ids)} files)",
+                    description=f"✅ Ready ({len(file_ids)} files) - Tap to get in bot",
                     input_message_content=InputTextMessageContent(
-                        f"{INLINE_TRIGGER_PREFIX}{url}"
-                    )
+                        f"📱 Instagram media ready!\n👉 [Open in bot](https://t.me/{bot_username}?start={start_param})",
+                        parse_mode=ParseMode.MARKDOWN
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📥 Get Media", url=f"https://t.me/{bot_username}?start={start_param}")
+                    ]])
                 )
             ]
             await update.inline_query.answer(results, cache_time=30)
             return
         
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="📥 Download Instagram media",
-                description=f"Download from {url[:60]}",
-                input_message_content=InputTextMessageContent(
-                    f"{INLINE_TRIGGER_PREFIX}{url}"
+        # Not cached - check if any user has cookies
+        if not self.cookies and not self.cookie_file_ids:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="❌ No cookies configured",
+                    description="An admin needs to set up cookies first",
+                    input_message_content=InputTextMessageContent(
+                        "❌ Bot not configured. Contact admin to set up Instagram cookies."
+                    )
                 )
-            )
-        ]
-        await update.inline_query.answer(results, cache_time=10)
-    
-    async def handle_inline_trigger(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        msg = update.message
-        if not msg or not msg.text:
-            return
-        if not msg.text.startswith(INLINE_TRIGGER_PREFIX):
+            ]
+            await update.inline_query.answer(results, cache_time=10)
             return
         
-        uid = msg.from_user.id
-        if not self._ok(uid):
-            return
+        # Start background download
+        download_id = str(uuid4())[:8]
+        cookie_uid = next((u for u in self.cookies if self.cookies[u]), None)
+        if not cookie_uid:
+            cookie_uid = next((u for u in self.cookie_file_ids if self.cookie_file_ids[u]), None)
         
-        url = msg.text[len(INLINE_TRIGGER_PREFIX):].strip()
-        if not self._extract_url(url):
-            return
-        
-        if uid not in self.cookies:
-            loaded = await self._ensure_cookies_loaded(uid, context)
-            if not loaded:
-                await msg.reply_text("❌ Cookies not available. Please set them in private chat with /cookies.")
-                return
-        
-        await self._auto_download_and_send(uid, url, msg.chat_id, context)
+        if cookie_uid:
+            self._pending_downloads[download_id] = {
+                'uid': cookie_uid,
+                'url': url,
+                'status': 'pending',
+                'started_at': time.time(),
+            }
+            
+            asyncio.create_task(self._background_download(download_id, cookie_uid, url))
+            
+            start_param = f"dl_{download_id}"
+            
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="📥 Download started...",
+                    description="Tap to check status in bot",
+                    input_message_content=InputTextMessageContent(
+                        f"⏳ Downloading Instagram media...\n👉 [Check status in bot](https://t.me/{bot_username}?start={start_param})",
+                        parse_mode=ParseMode.MARKDOWN
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📥 Check Download", url=f"https://t.me/{bot_username}?start={start_param}")
+                    ]])
+                )
+            ]
+            await update.inline_query.answer(results, cache_time=10)
+        else:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="❌ No cookies available",
+                    description="Set up cookies in bot first",
+                    input_message_content=InputTextMessageContent(
+                        f"❌ Set up Instagram cookies first: https://t.me/{bot_username}?start=cookies"
+                    )
+                )
+            ]
+            await update.inline_query.answer(results, cache_time=10)
     
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
@@ -718,7 +876,6 @@ class InstagramDownloaderBot:
                     "Make sure you're logged into Instagram and export correctly.")
                 return WAITING_FOR_COOKIES
             
-            # Clean up old temp file if exists
             if uid in self.cookies:
                 try:
                     os.unlink(self.cookies[uid])
@@ -756,6 +913,7 @@ class InstagramDownloaderBot:
             f"💾 Cached URLs: {len(self.file_id_cache._cache)}\n"
             f"👥 Users with cookie refs: {len(self.cookie_file_ids)}\n"
             f"🍪 Active cookies in RAM: {len(self.cookies)}\n"
+            f"⏳ Pending downloads: {len(self._pending_downloads)}\n"
             f"🗑️ Storage days: {self.config.STORAGE_DAYS}\n"
             f"🌐 Inline mode: Enabled",
             parse_mode=ParseMode.MARKDOWN,
@@ -772,6 +930,40 @@ class InstagramDownloaderBot:
             await self._ask_cookies(u, c)
         elif d == 'admin_stats':
             await self._admin_stats(u, c)
+        elif d.startswith('check_dl_'):
+            download_ref = d[9:]
+            await self._check_download(u, c, download_ref)
+    
+    async def _check_download(self, u, c, download_ref: str):
+        q = u.callback_query
+        uid = u.effective_user.id
+        
+        if download_ref in self._pending_downloads:
+            pending = self._pending_downloads[download_ref]
+            status = pending.get('status', 'unknown')
+            
+            if status == 'ready':
+                await q.message.edit_text("✅ Download ready! Sending...")
+                # Re-trigger start with the download link
+                c.args = [f"dl_{download_ref}"]
+                await self.start_cmd(u, c)
+                return
+            elif status in ('pending', 'downloading'):
+                elapsed = int(time.time() - pending.get('started_at', time.time()))
+                await q.message.edit_text(
+                    f"⏳ Still downloading ({elapsed}s)...",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔄 Check Again", callback_data=f"check_dl_{download_ref}")
+                    ]])
+                )
+                return
+            elif status == 'failed':
+                error = pending.get('error', 'Unknown error')
+                await q.message.edit_text(f"❌ Failed: {error}")
+                del self._pending_downloads[download_ref]
+                return
+        
+        await q.message.edit_text("❌ Download not found. It may have expired.")
     
     def run(self):
         app = Application.builder().token(self.config.BOT_TOKEN).build()
@@ -795,10 +987,6 @@ class InstagramDownloaderBot:
             ],
             per_message=False))
         app.add_handler(CallbackQueryHandler(self._router))
-        app.add_handler(MessageHandler(
-            filters.TEXT & filters.Regex(f'^{re.escape(INLINE_TRIGGER_PREFIX)}'),
-            self.handle_inline_trigger
-        ))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
         app.add_handler(InlineQueryHandler(self.inline_query))
         
