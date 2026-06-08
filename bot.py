@@ -282,7 +282,6 @@ class InstagramDownloaderBot:
         ])
     
     async def _show_start(self, update, context, edit=False):
-        """Show welcome message. If edit=True, edit existing message; otherwise send new."""
         if update.callback_query:
             uid = update.callback_query.from_user.id
             msg = update.callback_query.message
@@ -578,7 +577,6 @@ class InstagramDownloaderBot:
                 download_ref = deep_link[3:]
                 logger.info(f"Looking for download ref: {download_ref}")
                 
-                # Check pending downloads (includes 'cached' status entries)
                 if download_ref in self._pending_downloads:
                     pending = self._pending_downloads[download_ref]
                     status = pending.get('status', 'unknown')
@@ -603,7 +601,6 @@ class InstagramDownloaderBot:
                                         await c.bot.send_document(chat_id=uid, document=fid, caption=caption)
                                 await asyncio.sleep(0.3)
                             await status_msg.delete()
-                            del self._pending_downloads[download_ref]
                             return
                     
                     elif status == 'ready':
@@ -629,7 +626,8 @@ class InstagramDownloaderBot:
                         for fp in file_paths:
                             Path(fp).unlink(missing_ok=True)
                         
-                        del self._pending_downloads[download_ref]
+                        self._pending_downloads[download_ref]['status'] = 'cached'
+                        self._pending_downloads[download_ref]['file_paths'] = []
                         return
                     
                     elif status in ('pending', 'downloading'):
@@ -646,7 +644,6 @@ class InstagramDownloaderBot:
                     elif status == 'failed':
                         error = pending.get('error', 'Unknown error')
                         await u.message.reply_text(f"❌ Download failed: {error}")
-                        del self._pending_downloads[download_ref]
                         return
                 
                 await u.message.reply_text("❌ Download not found. It may have expired.")
@@ -808,7 +805,6 @@ class InstagramDownloaderBot:
             file_ids = cached.get('file_ids', [])
             title = cached.get('title', 'Instagram Media')
             
-            # Use short unique ID for cached content deep link
             download_id = str(uuid4())[:8]
             self._pending_downloads[download_id] = {
                 'uid': 0,
@@ -1024,7 +1020,6 @@ class InstagramDownloaderBot:
             elif status == 'failed':
                 error = pending.get('error', 'Unknown error')
                 await q.message.edit_text(f"❌ Failed: {error}")
-                del self._pending_downloads[download_ref]
                 return
         
         await q.message.edit_text("❌ Download not found. It may have expired.")
