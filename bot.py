@@ -1,38 +1,33 @@
 #!/usr/bin/env python3
 """
 Instagram Downloader Telegram Bot
-Uses gallery-dl for reliable Instagram downloads
-Auto-downloads and sends media, caches Telegram file IDs to prevent re-uploads
-Supports inline mode and group chats
+Entry point - initializes bot and registers handlers
 """
 
-import os
-import sys
-import logging
-import json
-import time
-import shutil
-import re
-import threading
-import subprocess
 import asyncio
+import logging
 import tempfile
+import os
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
-from uuid import uuid4
+from typing import Dict
 
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto,
-    InlineQueryResultArticle, InputTextMessageContent
-)
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes, InlineQueryHandler
+    ConversationHandler, filters, InlineQueryHandler
 )
 from telegram.constants import ParseMode
 
 from config import Config
+from core.downloader import check_gallery_dl
+from core.cache import FileIDCache
+from core.cookies import load_cookie_ids, save_cookie_ids
+
+from handlers.start import start_cmd
+from handlers.messages import on_private_msg, on_group_msg
+from handlers.inline import inline_query
+from handlers.cookies_handler import ask_cookies, recv_cookies, WAITING_FOR_COOKIES
+from handlers.callbacks import router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -49,200 +44,43 @@ logger.addHandler(h)
 logger.propagate = False
 
 # ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DATA_DIR = Path('data')
-DOWNLOADS_DIR = Path('downloads')
-CACHE_FILE = DATA_DIR / 'file_id_cache.json'
-COOKIE_IDS_FILE = DATA_DIR / 'cookie_file_ids.json'
-WAITING_FOR_COOKIES = 1
-
-INSTAGRAM_RE = re.compile(
-    r'(https?://)?(www\.)?instagram\.com/('
-    r'p/[^/?#\s]+|'
-    r'reel/[^/?#\s]+|'
-    r'stories/[^/?#\s]+|'
-    r'[^/?#\s]+/?$'
-    r')'
-)
-
-MAX_IMAGES_PER_MEDIA_GROUP = 10
-MAX_CAPTION_LENGTH = 1024
-
-# ---------------------------------------------------------------------------
-# File ID Cache
-# ---------------------------------------------------------------------------
-class FileIDCache:
-    """Cache Telegram file IDs per URL to prevent re-uploading"""
-    
-    def __init__(self, storage_days: int):
-        self.storage_days = storage_days
-        self._cache: Dict[str, dict] = {}
-        self._load()
-    
-    def _load(self):
-        try:
-            if CACHE_FILE.exists():
-                self._cache = json.loads(CACHE_FILE.read_text())
-                logger.info(f"Loaded {len(self._cache)} cached file IDs")
-        except Exception as e:
-            logger.error(f"Cache load error: {e}")
-            self._cache = {}
-    
-    def _save(self):
-        try:
-            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            CACHE_FILE.write_text(json.dumps(self._cache, indent=2))
-        except Exception as e:
-            logger.error(f"Cache save error: {e}")
-    
-    def get(self, url: str) -> Optional[dict]:
-        entry = self._cache.get(url)
-        if not entry:
-            return None
-        cached_time = entry.get('cached_time', 0)
-        if cached_time:
-            age_days = (time.time() - cached_time) / 86400
-            if age_days > self.storage_days:
-                return None
-        return entry
-    
-    def add(self, url: str, file_ids: List[str], title: str = '', username: str = ''):
-        self._cache[url] = {
-            'file_ids': file_ids,
-            'title': title,
-            'username': username,
-            'cached_time': time.time(),
-        }
-        self._save()
-        logger.info(f"Cached {len(file_ids)} file IDs for {url[:80]}")
-    
-    def cleanup_expired(self):
-        cutoff = time.time() - (self.storage_days * 86400)
-        expired = []
-        for url, entry in self._cache.items():
-            if entry.get('cached_time', 0) < cutoff:
-                expired.append(url)
-        for url in expired:
-            self._cache.pop(url, None)
-        if expired:
-            logger.info(f"Cleaned {len(expired)} expired cache entries")
-            self._save()
-
-# ---------------------------------------------------------------------------
 # Bot
 # ---------------------------------------------------------------------------
 class InstagramDownloaderBot:
     def __init__(self):
         self.config = Config()
         
-        for d in (DATA_DIR, DOWNLOADS_DIR):
+        for d in [Path('data'), Path('downloads')]:
             d.mkdir(parents=True, exist_ok=True)
         
         self.cookies: Dict[int, str] = {}
-        self.cookie_file_ids: Dict[int, str] = {}
+        self.cookie_file_ids: Dict[int, str] = load_cookie_ids()
         self._pending_downloads: Dict[str, dict] = {}
         self._allowed_groups: Dict[int, bool] = {}
-        
-        self.file_id_cache = FileIDCache(self.config.STORAGE_DAYS)
         self._download_locks: Dict[str, asyncio.Lock] = {}
         self._cookie_locks: Dict[int, asyncio.Lock] = {}
         
-        self._check_gallery_dl()
-        self._load_cookie_ids()
-        self._start_cleanup()
-    
-    def _check_gallery_dl(self):
-        try:
-            result = subprocess.run(['gallery-dl', '--version'], capture_output=True, text=True)
-            logger.info(f"gallery-dl version: {result.stdout.strip()}")
-        except FileNotFoundError:
-            logger.error("gallery-dl not found! Installing...")
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 'gallery-dl'], check=True)
-    
-    def _load_cookie_ids(self):
-        try:
-            if COOKIE_IDS_FILE.exists():
-                data = json.loads(COOKIE_IDS_FILE.read_text())
-                self.cookie_file_ids = {int(k): v for k, v in data.items()}
-                logger.info(f"Loaded {len(self.cookie_file_ids)} cookie file references")
-        except Exception as e:
-            logger.error(f"Load cookie IDs error: {e}")
-            self.cookie_file_ids = {}
-    
-    def _save_cookie_ids(self):
-        try:
-            COOKIE_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            COOKIE_IDS_FILE.write_text(json.dumps(
-                {str(k): v for k, v in self.cookie_file_ids.items()}, indent=2))
-        except Exception as e:
-            logger.error(f"Save cookie IDs error: {e}")
-    
-    def _start_cleanup(self):
-        def w():
-            while True:
-                try:
-                    self._cleanup()
-                except Exception as e:
-                    logger.error(f"Cleanup: {e}")
-                time.sleep(3600)
-        threading.Thread(target=w, daemon=True).start()
-    
-    def _cleanup(self):
-        cutoff = datetime.now() - timedelta(days=self.config.STORAGE_DAYS)
-        for f in DOWNLOADS_DIR.iterdir():
-            if f.is_file() and datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
-                f.unlink()
-                logger.info(f"Cleaned up file: {f.name}")
-        for d in DOWNLOADS_DIR.iterdir():
-            if d.is_dir() and not any(d.iterdir()):
-                d.rmdir()
-        self.file_id_cache.cleanup_expired()
-        cutoff_ts = time.time() - (self.config.STORAGE_DAYS * 86400)
-        expired = [k for k, v in self._pending_downloads.items() if v.get('started_at', 0) < cutoff_ts]
-        for k in expired:
-            del self._pending_downloads[k]
-        self._allowed_groups.clear()
-    
-    def _ok(self, uid):
-        return not self.config.get_whitelist() or uid in self.config.get_whitelist()
-    
-    def _is_admin(self, uid):
-        admins = self.config.get_admins()
-        if not admins:
-            return False
-        return uid in admins
-    
-    async def _is_group_allowed(self, chat_id, context) -> bool:
-        whitelist = self.config.get_whitelist()
-        if not whitelist:
-            return True
+        self.file_id_cache = FileIDCache(self.config.STORAGE_DAYS)
         
-        if chat_id in self._allowed_groups:
-            return self._allowed_groups[chat_id]
-        
-        try:
-            admins = await context.bot.get_chat_administrators(chat_id)
-            for admin in admins:
-                if admin.user.id in whitelist:
-                    self._allowed_groups[chat_id] = True
-                    return True
-            self._allowed_groups[chat_id] = False
-            return False
-        except Exception as e:
-            logger.error(f"Failed to check group admins for {chat_id}: {e}")
-            return False
+        check_gallery_dl()
     
-    def _extract_url(self, text):
-        m = INSTAGRAM_RE.search(text)
-        if m:
-            u = m.group(0)
-            if u.startswith('www.'):
-                u = 'https://' + u
-            elif not u.startswith('http'):
-                u = 'https://' + u
-            return u.rstrip('/')
-        return None
+    def _menu(self, uid):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data='c')],
+        ])
+    
+    def _admin_menu(self, uid):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from utils.helpers import check_admin
+        cache_count = len(self.file_id_cache)
+        cookie_count = len(self.cookie_file_ids)
+        label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data='c')],
+            [InlineKeyboardButton(f"📊 Stats: {cache_count} cached, {cookie_count} users", callback_data='admin_stats')],
+        ])
     
     def _get_download_lock(self, url: str) -> asyncio.Lock:
         if url not in self._download_locks:
@@ -253,67 +91,6 @@ class InstagramDownloaderBot:
         if uid not in self._cookie_locks:
             self._cookie_locks[uid] = asyncio.Lock()
         return self._cookie_locks[uid]
-    
-    def _get_unique_download_dir(self, uid: int) -> Path:
-        timestamp = int(time.time())
-        dir_name = f"{uid}_{timestamp}"
-        return DOWNLOADS_DIR / dir_name
-    
-    def _cookie_status_text(self, uid):
-        if uid in self.cookies:
-            return "✅"
-        elif uid in self.cookie_file_ids:
-            return "📎"
-        return "❌"
-    
-    def _menu(self, uid):
-        label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(label, callback_data='c')],
-        ])
-    
-    def _admin_menu(self, uid):
-        cache_count = len(self.file_id_cache._cache)
-        cookie_count = len(self.cookie_file_ids)
-        label = "🍪 Update Cookies" if uid in self.cookies or uid in self.cookie_file_ids else "🍪 Upload Cookies"
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(label, callback_data='c')],
-            [InlineKeyboardButton(f"📊 Stats: {cache_count} cached, {cookie_count} users", callback_data='admin_stats')],
-        ])
-    
-    async def _show_start(self, update, context, edit=False):
-        if update.callback_query:
-            uid = update.callback_query.from_user.id
-            msg = update.callback_query.message
-        else:
-            uid = update.effective_user.id
-            msg = update.message
-        
-        cookie_status = self._cookie_status_text(uid)
-        reply_markup = self._admin_menu(uid) if self._is_admin(uid) else self._menu(uid)
-        bot_username = context.bot.username
-        
-        text = (
-            f"👋 Welcome {update.effective_user.first_name}!\n\n"
-            "📱 *Instagram Downloader Bot*\n\n"
-            "💡 Just send an Instagram link!\n"
-            "• Posts → All images/videos\n"
-            "• Reels → Video\n"
-            "• Stories → Images/videos\n"
-            "• Profiles → Profile picture\n\n"
-            "🌐 *Inline Mode:*\n"
-            f"Type @{bot_username} <link> in any chat!\n\n"
-            "👥 *Groups:* Works in groups where\n"
-            "a whitelisted user is admin\n\n"
-            f"🍪 Cookies: {cookie_status}\n"
-            "🔄 Duplicate links use cache\n"
-            f"🗑️ Cache: {self.config.STORAGE_DAYS}d"
-        )
-        
-        if edit:
-            await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
-        else:
-            await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
     
     async def _ensure_cookies_loaded(self, uid: int, context) -> bool:
         if uid in self.cookies:
@@ -346,322 +123,64 @@ class InstagramDownloaderBot:
                 logger.error(f"Failed to download cookies for {uid}: {e}")
                 return False
     
-    def _sync_download(self, uid, url):
-        cookie_path = self.cookies[uid]
-        output_dir = self._get_unique_download_dir(uid)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            cmd = ['gallery-dl', '--cookies', cookie_path, '--dest', str(output_dir), url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            
-            if result.returncode != 0:
-                raise Exception(f"Download failed: {result.stderr[:200]}")
-            
-            all_files = sorted(
-                [str(f) for f in output_dir.rglob('*') if f.is_file()],
-                key=lambda x: Path(x).name
-            )
-            
-            if not all_files:
-                raise Exception("No files downloaded")
-            
-            info = self._sync_get_info(uid, url)
-            title = info.get('title', 'Instagram Media')
-            username = info.get('username', '')
-            
-            logger.info(f"Downloaded {len(all_files)} files")
-            return all_files, title, username
-            
-        except Exception as e:
-            shutil.rmtree(output_dir, ignore_errors=True)
-            raise
-    
-    def _sync_get_info(self, uid, url):
-        cookie_path = self.cookies[uid]
-        
-        try:
-            cmd = ['gallery-dl', '--cookies', cookie_path, '--dump-json', url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if isinstance(data, list) and len(data) > 0:
-                    first = data[0]
-                    if isinstance(first, list) and len(first) >= 2:
-                        meta = first[1]
-                        if isinstance(meta, dict):
-                            return {
-                                'title': (meta.get('description', '') or 
-                                         f"Post by {meta.get('username', 'Unknown')}").strip(),
-                                'username': meta.get('username', ''),
-                            }
-        except:
-            pass
-        
-        return {'title': 'Instagram Media', 'username': ''}
-    
-    def _split_caption(self, text: str, max_len: int = MAX_CAPTION_LENGTH) -> str:
-        if len(text) <= max_len:
-            return text
-        return text[:max_len - 3] + "..."
-    
-    async def _send_media_batch(self, chat_id, context, file_paths: List[str], caption: str, reply_to_message_id: int = None):
-        if not file_paths:
-            return []
-        
-        all_file_ids = []
-        images = []
-        videos = []
-        others = []
-        
-        for fp in file_paths:
-            ext = Path(fp).suffix.lower()
-            if ext in ('.jpg', '.jpeg', '.png', '.webp'):
-                images.append(fp)
-            elif ext in ('.mp4', '.webm', '.mkv'):
-                videos.append(fp)
-            else:
-                others.append(fp)
-        
-        total_images = len(images)
-        if total_images > 0:
-            batches = [images[i:i + MAX_IMAGES_PER_MEDIA_GROUP] 
-                      for i in range(0, total_images, MAX_IMAGES_PER_MEDIA_GROUP)]
-            
-            for batch_idx, batch in enumerate(batches):
-                media_group = []
-                batch_caption = ""
-                
-                if batch_idx == 0 and caption:
-                    batch_caption = self._split_caption(caption)
-                
-                for i, fp in enumerate(batch):
-                    with open(fp, 'rb') as f:
-                        if i == 0 and batch_caption:
-                            media_group.append(InputMediaPhoto(media=f, caption=batch_caption))
-                        else:
-                            media_group.append(InputMediaPhoto(media=f))
-                
-                if media_group:
-                    try:
-                        sent = await context.bot.send_media_group(
-                            chat_id=chat_id,
-                            media=media_group,
-                            reply_to_message_id=reply_to_message_id,
-                            write_timeout=60,
-                            read_timeout=60,
-                        )
-                        for s in sent:
-                            if s.photo:
-                                all_file_ids.append(s.photo[-1].file_id)
-                        logger.info(f"Sent image batch {batch_idx + 1}/{len(batches)}")
-                    except Exception as e:
-                        logger.error(f"Failed to send image batch: {e}")
-                        for fp in batch:
-                            try:
-                                with open(fp, 'rb') as f:
-                                    s = await context.bot.send_photo(
-                                        chat_id=chat_id, photo=f,
-                                        reply_to_message_id=reply_to_message_id)
-                                    all_file_ids.append(s.photo[-1].file_id)
-                            except Exception as e2:
-                                logger.error(f"Failed to send individual image: {e2}")
-                
-                if len(batches) > 1:
-                    await asyncio.sleep(1)
-        
-        for fp in videos:
-            try:
-                with open(fp, 'rb') as f:
-                    s = await context.bot.send_video(
-                        chat_id=chat_id,
-                        video=f,
-                        caption=self._split_caption(caption) if not images else None,
-                        supports_streaming=True,
-                        reply_to_message_id=reply_to_message_id,
-                        write_timeout=60,
-                    )
-                    all_file_ids.append(s.video.file_id)
-            except Exception as e:
-                logger.error(f"Failed to send video: {e}")
-        
-        for fp in others:
-            try:
-                with open(fp, 'rb') as f:
-                    s = await context.bot.send_document(
-                        chat_id=chat_id, document=f,
-                        reply_to_message_id=reply_to_message_id)
-                    all_file_ids.append(s.document.file_id)
-            except Exception as e:
-                logger.error(f"Failed to send document: {e}")
-        
-        return all_file_ids
-    
-    async def _resend_by_file_ids(self, chat_id, context, cached_entry: dict, reply_to_message_id: int = None):
-        file_ids = cached_entry.get('file_ids', [])
-        title = cached_entry.get('title', '')
-        
-        if not file_ids:
-            return False
-        
-        try:
-            for i, file_id in enumerate(file_ids):
-                caption = self._split_caption(title) if i == 0 and title else None
-                try:
-                    await context.bot.send_video(
-                        chat_id=chat_id, video=file_id,
-                        caption=caption, supports_streaming=True,
-                        reply_to_message_id=reply_to_message_id)
-                except:
-                    try:
-                        await context.bot.send_photo(
-                            chat_id=chat_id, photo=file_id, caption=caption,
-                            reply_to_message_id=reply_to_message_id)
-                    except:
-                        try:
-                            await context.bot.send_document(
-                                chat_id=chat_id, document=file_id, caption=caption,
-                                reply_to_message_id=reply_to_message_id)
-                        except:
-                            return False
-                await asyncio.sleep(0.3)
+    async def _is_group_allowed(self, chat_id, context) -> bool:
+        from utils.helpers import check_whitelist
+        whitelist = self.config.get_whitelist()
+        if not whitelist:
             return True
+        
+        if chat_id in self._allowed_groups:
+            return self._allowed_groups[chat_id]
+        
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            for admin in admins:
+                if admin.user.id in whitelist:
+                    self._allowed_groups[chat_id] = True
+                    return True
+            self._allowed_groups[chat_id] = False
+            return False
         except Exception as e:
-            logger.error(f"Resend error: {e}")
+            logger.error(f"Failed to check group admins for {chat_id}: {e}")
             return False
     
-    async def _background_download(self, download_id: str, uid: int, url: str):
-        try:
-            self._pending_downloads[download_id]['status'] = 'downloading'
-            
-            if uid not in self.cookies:
-                self._pending_downloads[download_id]['status'] = 'failed'
-                self._pending_downloads[download_id]['error'] = 'Cookies not loaded'
-                return
-            
-            file_paths, title, username = await asyncio.get_event_loop().run_in_executor(
-                None, self._sync_download, uid, url)
-            
-            if not file_paths:
-                self._pending_downloads[download_id]['status'] = 'failed'
-                self._pending_downloads[download_id]['error'] = 'No media found'
-                return
-            
-            total_size = sum(Path(fp).stat().st_size for fp in file_paths)
-            
-            self._pending_downloads[download_id]['status'] = 'ready'
-            self._pending_downloads[download_id]['file_paths'] = file_paths
-            self._pending_downloads[download_id]['title'] = title
-            self._pending_downloads[download_id]['username'] = username
-            self._pending_downloads[download_id]['total_size'] = total_size
-            self._pending_downloads[download_id]['url'] = url
-            
-        except Exception as e:
-            logger.error(f"Background download failed: {e}")
-            self._pending_downloads[download_id]['status'] = 'failed'
-            self._pending_downloads[download_id]['error'] = str(e)[:200]
+    async def _ask_cookies(self, u, c):
+        return await ask_cookies(self, u, c)
     
-    # --- Handlers ---
-    async def start_cmd(self, u, c):
-        uid = u.effective_user.id
-        args = c.args
+    def run(self):
+        app = Application.builder().token(self.config.BOT_TOKEN).build()
         
-        logger.info(f"Start command from {uid}, args: {args}")
+        app.add_handler(CommandHandler('start', lambda u, c: start_cmd(self, u, c)))
+        app.add_handler(CommandHandler('help', lambda u, c: self._help_cmd(u, c)))
+        app.add_handler(ConversationHandler(
+            entry_points=[
+                CommandHandler('cookies', lambda u, c: ask_cookies(self, u, c)),
+                CallbackQueryHandler(lambda u, c: ask_cookies(self, u, c), pattern='^c$')
+            ],
+            states={
+                WAITING_FOR_COOKIES: [
+                    MessageHandler(filters.Document.FileExtension("txt"), lambda u, c: recv_cookies(self, u, c)),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: ask_cookies(self, u, c))
+                ]
+            },
+            fallbacks=[
+                CommandHandler('cancel', self._cancel_cmd),
+                CallbackQueryHandler(lambda u, c: router(self, u, c), pattern='^b$')
+            ],
+            per_message=False))
+        app.add_handler(CallbackQueryHandler(lambda u, c: router(self, u, c)))
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+            lambda u, c: on_group_msg(self, u, c)))
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            lambda u, c: on_private_msg(self, u, c)))
+        app.add_handler(InlineQueryHandler(lambda u, c: inline_query(self, u, c)))
         
-        if args:
-            deep_link = args[0]
-            logger.info(f"Deep link: {deep_link}")
-            
-            if deep_link.startswith('dl_'):
-                download_ref = deep_link[3:]
-                logger.info(f"Looking for download ref: {download_ref}")
-                
-                if download_ref in self._pending_downloads:
-                    pending = self._pending_downloads[download_ref]
-                    status = pending.get('status', 'unknown')
-                    logger.info(f"Found pending download: {status}")
-                    
-                    if status == 'cached':
-                        url = pending.get('url', '')
-                        cached = self.file_id_cache.get(url)
-                        if cached:
-                            file_ids = cached.get('file_ids', [])
-                            title = cached.get('title', 'Instagram Media')
-                            status_msg = await u.message.reply_text(f"📤 Sending {len(file_ids)} files...")
-                            
-                            for i, fid in enumerate(file_ids):
-                                caption = title if i == 0 else None
-                                try:
-                                    await c.bot.send_video(chat_id=uid, video=fid, caption=caption, supports_streaming=True)
-                                except:
-                                    try:
-                                        await c.bot.send_photo(chat_id=uid, photo=fid, caption=caption)
-                                    except:
-                                        await c.bot.send_document(chat_id=uid, document=fid, caption=caption)
-                                await asyncio.sleep(0.3)
-                            await status_msg.delete()
-                            return
-                    
-                    elif status == 'ready':
-                        file_paths = pending.get('file_paths', [])
-                        title = pending.get('title', 'Instagram Media')
-                        username = pending.get('username', '')
-                        url = pending.get('url', '')
-                        
-                        file_count = len(file_paths)
-                        status_msg = await u.message.reply_text(f"📤 Uploading {file_count} files...")
-                        
-                        caption = title
-                        if username:
-                            caption = f"📱 @{username}\n{title}"
-                        
-                        file_ids = await self._send_media_batch(uid, c, file_paths, caption)
-                        
-                        if file_ids and url:
-                            self.file_id_cache.add(url, file_ids, title, username)
-                        
-                        await status_msg.delete()
-                        
-                        for fp in file_paths:
-                            Path(fp).unlink(missing_ok=True)
-                        
-                        self._pending_downloads[download_ref]['status'] = 'cached'
-                        self._pending_downloads[download_ref]['file_paths'] = []
-                        return
-                    
-                    elif status in ('pending', 'downloading'):
-                        elapsed = int(time.time() - pending.get('started_at', time.time()))
-                        await u.message.reply_text(
-                            f"⏳ Download in progress ({elapsed}s)...\n"
-                            f"Tap the link again to check.",
-                            reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton("🔄 Check Again", callback_data=f"check_dl_{download_ref}")
-                            ]])
-                        )
-                        return
-                    
-                    elif status == 'failed':
-                        error = pending.get('error', 'Unknown error')
-                        await u.message.reply_text(f"❌ Download failed: {error}")
-                        return
-                
-                await u.message.reply_text("❌ Download not found. It may have expired.")
-                return
-            
-            elif deep_link == 'cookies':
-                if not self._ok(uid):
-                    await u.message.reply_text("❌ Not authorized.")
-                    return
-                await self._ask_cookies(u, c)
-                return
-        
-        if not self._ok(uid):
-            return
-        
-        await self._show_start(u, c, edit=False)
+        logger.info(f"Instagram Bot starting (inline, groups, cookie refs: {len(self.cookie_file_ids)}, cache: {len(self.file_id_cache)})...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
     
-    async def help_cmd(self, u, c):
+    async def _help_cmd(self, u, c):
         await u.message.reply_text(
             "📚 Just send an Instagram link to download!\n\n"
             "Commands:\n"
@@ -673,387 +192,9 @@ class InstagramDownloaderBot:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=self._menu(u.effective_user.id))
     
-    async def cancel_cmd(self, u, c):
+    async def _cancel_cmd(self, u, c):
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
-    
-    async def on_private_msg(self, u, c):
-        uid = u.effective_user.id
-        if not self._ok(uid):
-            return
-        
-        url = self._extract_url(u.message.text)
-        if not url:
-            return
-        
-        if uid not in self.cookies:
-            loaded = await self._ensure_cookies_loaded(uid, c)
-            if not loaded:
-                cached = self.file_id_cache.get(url)
-                if cached and cached.get('file_ids'):
-                    await self._resend_by_file_ids(u.message.chat_id, c, cached)
-                    return
-                
-                await u.message.reply_text(
-                    "❌ Cookies not available.\n"
-                    "Use /cookies to upload your Instagram cookies.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')
-                    ]]))
-                return
-        
-        await self._auto_download_and_send(uid, url, u.message.chat_id, c)
-    
-    async def on_group_msg(self, u, c):
-        uid = u.effective_user.id
-        chat_id = u.effective_chat.id
-        
-        if not await self._is_group_allowed(chat_id, c):
-            return
-        
-        if uid not in self.cookies:
-            loaded = await self._ensure_cookies_loaded(uid, c)
-            if not loaded:
-                return
-        
-        url = self._extract_url(u.message.text)
-        if not url:
-            return
-        
-        message_id = u.message.message_id
-        
-        cached = self.file_id_cache.get(url)
-        if cached and cached.get('file_ids'):
-            await self._resend_by_file_ids(chat_id, c, cached, reply_to_message_id=message_id)
-            return
-        
-        status = await u.message.reply_text("⏳ Downloading...")
-        try:
-            await self._auto_download_and_send(uid, url, chat_id, c, reply_to_message_id=message_id)
-        finally:
-            await status.delete()
-    
-    async def _auto_download_and_send(self, uid, url, chat_id, context, reply_to_message_id: int = None):
-        cached = self.file_id_cache.get(url)
-        if cached and cached.get('file_ids'):
-            success = await self._resend_by_file_ids(chat_id, context, cached, reply_to_message_id)
-            if success:
-                return
-        
-        lock = self._get_download_lock(url)
-        
-        async with lock:
-            cached = self.file_id_cache.get(url)
-            if cached and cached.get('file_ids'):
-                await self._resend_by_file_ids(chat_id, context, cached, reply_to_message_id)
-                return
-            
-            try:
-                file_paths, title, username = await asyncio.get_event_loop().run_in_executor(
-                    None, self._sync_download, uid, url)
-                
-                file_count = len(file_paths)
-                
-                caption = title
-                if username:
-                    caption = f"📱 @{username}\n{title}"
-                if file_count > 1:
-                    caption += f"\n\n📸 {file_count} images"
-                
-                file_ids = await self._send_media_batch(chat_id, context, file_paths, caption, reply_to_message_id)
-                
-                if file_ids:
-                    self.file_id_cache.add(url, file_ids, title, username)
-                
-                logger.info(f"Sent {len(file_ids)} files for {url[:80]}")
-                
-                for fp in file_paths:
-                    Path(fp).unlink(missing_ok=True)
-                parent = Path(file_paths[0]).parent
-                if parent.exists():
-                    shutil.rmtree(parent, ignore_errors=True)
-                
-            except Exception as e:
-                logger.error(f"Download error: {str(e)[:200]}")
-                if reply_to_message_id is None:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"❌ Failed: {str(e)[:200]}\n\n⚠️ Re-upload cookies with /cookies if needed")
-    
-    async def inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.inline_query.query.strip()
-        bot_username = context.bot.username
-        
-        url = self._extract_url(query)
-        if not url:
-            results = [
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="Send an Instagram link",
-                    description="Example: https://www.instagram.com/p/CODE/",
-                    input_message_content=InputTextMessageContent(
-                        "📱 Send an Instagram link to download."
-                    )
-                )
-            ]
-            await update.inline_query.answer(results, cache_time=10)
-            return
-        
-        cached = self.file_id_cache.get(url)
-        
-        if cached:
-            file_ids = cached.get('file_ids', [])
-            title = cached.get('title', 'Instagram Media')
-            
-            download_id = str(uuid4())[:8]
-            self._pending_downloads[download_id] = {
-                'uid': 0,
-                'url': url,
-                'status': 'cached',
-                'started_at': time.time(),
-            }
-            
-            bot_link = f"https://t.me/{bot_username}?start=dl_{download_id}"
-            
-            results = [
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=f"📱 {title[:50]}",
-                    description=f"✅ Ready ({len(file_ids)} files) - Tap to get in bot",
-                    input_message_content=InputTextMessageContent(
-                        f"📱 [Get Instagram Media]({bot_link})",
-                        parse_mode=ParseMode.MARKDOWN
-                    ),
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Get Media", url=bot_link)
-                    ]])
-                )
-            ]
-            await update.inline_query.answer(results, cache_time=30)
-            return
-        
-        if not self.cookies and not self.cookie_file_ids:
-            results = [
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="❌ No cookies configured",
-                    description="An admin needs to set up cookies first",
-                    input_message_content=InputTextMessageContent(
-                        "❌ Bot not configured. Contact admin to set up Instagram cookies."
-                    )
-                )
-            ]
-            await update.inline_query.answer(results, cache_time=10)
-            return
-        
-        download_id = str(uuid4())[:8]
-        cookie_uid = next((u for u in self.cookies if self.cookies[u]), None)
-        if not cookie_uid:
-            cookie_uid = next((u for u in self.cookie_file_ids if self.cookie_file_ids[u]), None)
-        
-        if cookie_uid:
-            self._pending_downloads[download_id] = {
-                'uid': cookie_uid,
-                'url': url,
-                'status': 'pending',
-                'started_at': time.time(),
-            }
-            
-            asyncio.create_task(self._background_download(download_id, cookie_uid, url))
-            
-            bot_link = f"https://t.me/{bot_username}?start=dl_{download_id}"
-            
-            results = [
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="📥 Download started...",
-                    description="Tap to check status in bot",
-                    input_message_content=InputTextMessageContent(
-                        f"⏳ [Downloading...]({bot_link})",
-                        parse_mode=ParseMode.MARKDOWN
-                    ),
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 Check Download", url=bot_link)
-                    ]])
-                )
-            ]
-            await update.inline_query.answer(results, cache_time=10)
-        else:
-            results = [
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="❌ No cookies available",
-                    description="Set up cookies in bot first",
-                    input_message_content=InputTextMessageContent(
-                        f"❌ Set up Instagram cookies first: https://t.me/{bot_username}?start=cookies"
-                    )
-                )
-            ]
-            await update.inline_query.answer(results, cache_time=10)
-    
-    async def _ask_cookies(self, u, c):
-        if not self._ok(u.effective_user.id):
-            return ConversationHandler.END
-        msg = u.callback_query.message if u.callback_query else u.message
-        await msg.reply_text(
-            "⚠️ *Instagram Cookies Required*\n\n"
-            "1️⃣ Login to Instagram in browser\n"
-            "2️⃣ Use 'Get cookies.txt LOCALLY' extension\n"
-            "3️⃣ Click Export (not Export As JSON)\n"
-            "4️⃣ Send the .txt file here\n\n"
-            "🔒 Cookie content stays in RAM only\n"
-            "📎 Bot stores only a file reference, not your cookies",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Cancel", callback_data='b')
-            ]]))
-        return WAITING_FOR_COOKIES
-    
-    async def _recv_cookies(self, u, c):
-        uid = u.effective_user.id
-        if not self._ok(uid):
-            return ConversationHandler.END
-        
-        if not u.message.document:
-            await u.message.reply_text("❌ Please send the cookies.txt file.")
-            return WAITING_FOR_COOKIES
-        
-        try:
-            doc = u.message.document
-            tg_file = await c.bot.get_file(doc.file_id)
-            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-            tmp_path = tmp.name
-            await tg_file.download_to_drive(tmp_path)
-            
-            with open(tmp_path, 'r') as f:
-                content = f.read()
-            
-            if 'instagram.com' not in content:
-                os.unlink(tmp_path)
-                await u.message.reply_text(
-                    "❌ Invalid cookie file. No Instagram cookies found.\n"
-                    "Make sure you're logged into Instagram and export correctly.")
-                return WAITING_FOR_COOKIES
-            
-            if uid in self.cookies:
-                try:
-                    os.unlink(self.cookies[uid])
-                except:
-                    pass
-            
-            self.cookies[uid] = tmp_path
-            self.cookie_file_ids[uid] = doc.file_id
-            self._save_cookie_ids()
-            
-            await u.message.reply_text(
-                "✅ Cookies saved!\n\n"
-                "🔒 Cookie content stored in RAM only\n"
-                "📎 File reference saved for auto-reload\n"
-                "🔄 Cookies auto-load when bot restarts\n\n"
-                "Now send any Instagram link to download.\n"
-                "Works in private chat and groups!",
-                reply_markup=self._menu(uid))
-            return ConversationHandler.END
-            
-        except Exception as e:
-            logger.error(f"Cookie error: {e}")
-            await u.message.reply_text("❌ Failed to process cookies.")
-            return WAITING_FOR_COOKIES
-    
-    async def _admin_stats(self, u, c):
-        q = u.callback_query
-        uid = u.effective_user.id
-        
-        if not self._is_admin(uid):
-            await q.answer("Admin only", show_alert=True)
-            return
-        
-        await q.message.edit_text(
-            f"📊 *Bot Statistics*\n\n"
-            f"💾 Cached URLs: {len(self.file_id_cache._cache)}\n"
-            f"👥 Users with cookie refs: {len(self.cookie_file_ids)}\n"
-            f"🍪 Active cookies in RAM: {len(self.cookies)}\n"
-            f"⏳ Pending downloads: {len(self._pending_downloads)}\n"
-            f"🏠 Cached group permissions: {len(self._allowed_groups)}\n"
-            f"🗑️ Storage days: {self.config.STORAGE_DAYS}\n"
-            f"🌐 Inline mode: Enabled\n"
-            f"👥 Group mode: Enabled",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self._admin_menu(uid))
-    
-    async def _router(self, u, c):
-        q = u.callback_query
-        await q.answer()
-        d, uid = q.data, u.effective_user.id
-        
-        if d == 'b':
-            await self._show_start(u, c, edit=True)
-        elif d == 'c':
-            await self._ask_cookies(u, c)
-        elif d == 'admin_stats':
-            await self._admin_stats(u, c)
-        elif d.startswith('check_dl_'):
-            download_ref = d[9:]
-            await self._check_download(u, c, download_ref)
-    
-    async def _check_download(self, u, c, download_ref: str):
-        q = u.callback_query
-        
-        if download_ref in self._pending_downloads:
-            pending = self._pending_downloads[download_ref]
-            status = pending.get('status', 'unknown')
-            
-            if status in ('ready', 'cached'):
-                await q.message.edit_text("✅ Sending media...")
-                c.args = [f"dl_{download_ref}"]
-                await self.start_cmd(u, c)
-                return
-            elif status in ('pending', 'downloading'):
-                elapsed = int(time.time() - pending.get('started_at', time.time()))
-                await q.message.edit_text(
-                    f"⏳ Still downloading ({elapsed}s)...",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔄 Check Again", callback_data=f"check_dl_{download_ref}")
-                    ]])
-                )
-                return
-            elif status == 'failed':
-                error = pending.get('error', 'Unknown error')
-                await q.message.edit_text(f"❌ Failed: {error}")
-                return
-        
-        await q.message.edit_text("❌ Download not found. It may have expired.")
-    
-    def run(self):
-        app = Application.builder().token(self.config.BOT_TOKEN).build()
-        
-        app.add_handler(CommandHandler('start', self.start_cmd))
-        app.add_handler(CommandHandler('help', self.help_cmd))
-        app.add_handler(ConversationHandler(
-            entry_points=[
-                CommandHandler('cookies', self._ask_cookies),
-                CallbackQueryHandler(self._ask_cookies, pattern='^c$')
-            ],
-            states={
-                WAITING_FOR_COOKIES: [
-                    MessageHandler(filters.Document.FileExtension("txt"), self._recv_cookies),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._ask_cookies)
-                ]
-            },
-            fallbacks=[
-                CommandHandler('cancel', self.cancel_cmd),
-                CallbackQueryHandler(self._router, pattern='^b$')
-            ],
-            per_message=False))
-        app.add_handler(CallbackQueryHandler(self._router))
-        app.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, self.on_group_msg))
-        app.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, self.on_private_msg))
-        app.add_handler(InlineQueryHandler(self.inline_query))
-        
-        logger.info(f"Instagram Bot starting (groups, inline, cookie refs: {len(self.cookie_file_ids)}, cache: {len(self.file_id_cache._cache)})...")
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     InstagramDownloaderBot().run()
