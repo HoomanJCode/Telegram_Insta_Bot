@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Instagram Downloader Telegram Bot
-Entry point - initializes bot and registers handlers
+Uses gallery-dl for reliable Instagram downloads
+Auto-downloads and sends media, caches Telegram file IDs to prevent re-uploads
+Supports inline mode and group chats
 """
 
 import asyncio

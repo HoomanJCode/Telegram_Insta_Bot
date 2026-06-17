@@ -1,4 +1,6 @@
+# handlers/callbacks.py
 import logging
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -58,7 +60,6 @@ async def _check_download(bot_instance, u, c, download_ref: str):
             await start_cmd(bot_instance, u, c)
             return
         elif status in ('pending', 'downloading'):
-            import time
             elapsed = int(time.time() - pending.get('started_at', time.time()))
             await q.message.edit_text(
                 f"⏳ Still downloading ({elapsed}s)...",

@@ -1,6 +1,8 @@
+# handlers/inline.py
 import asyncio
 import logging
 import time
+from pathlib import Path
 from uuid import uuid4
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ContextTypes
@@ -139,12 +141,13 @@ async def _background_download(bot_instance, download_id: str, uid: int, url: st
             bot_instance._pending_downloads[download_id]['error'] = 'No media found'
             return
         
-        total_size = sum(Path(file_paths[0]).stat().st_size for fp in file_paths)  # Fixed
+        total_size = sum(Path(fp).stat().st_size for fp in file_paths)
         
         bot_instance._pending_downloads[download_id]['status'] = 'ready'
         bot_instance._pending_downloads[download_id]['file_paths'] = file_paths
         bot_instance._pending_downloads[download_id]['title'] = title
         bot_instance._pending_downloads[download_id]['username'] = username
+        bot_instance._pending_downloads[download_id]['total_size'] = total_size
         bot_instance._pending_downloads[download_id]['url'] = url
         
     except Exception as e:

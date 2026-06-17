@@ -1,3 +1,4 @@
+# handlers/messages.py
 import asyncio
 import logging
 from pathlib import Path
@@ -13,27 +14,29 @@ logger = logging.getLogger(__name__)
 
 async def on_private_msg(bot_instance, u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
-    if not check_whitelist(uid, bot_instance.config):
-        return
     
     url = extract_url(u.message.text)
     if not url:
         return
     
+    # Check cache first - works for everyone
+    cached = bot_instance.file_id_cache.get(url)
+    if cached and cached.get('file_ids'):
+        await resend_by_file_ids(u.message.chat_id, c, cached)
+        return
+    
+    # Need cookies for new downloads
     if uid not in bot_instance.cookies:
         loaded = await bot_instance._ensure_cookies_loaded(uid, c)
         if not loaded:
-            cached = bot_instance.file_id_cache.get(url)
-            if cached and cached.get('file_ids'):
-                await resend_by_file_ids(u.message.chat_id, c, cached)
-                return
-            
-            await u.message.reply_text(
-                "❌ Cookies not available.\n"
-                "Use /cookies to upload your Instagram cookies.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')
-                ]]))
+            # Only show cookie prompt to whitelisted users
+            if check_whitelist(uid, bot_instance.config):
+                await u.message.reply_text(
+                    "❌ Cookies not available.\n"
+                    "Use /cookies to upload your Instagram cookies.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')
+                    ]]))
             return
     
     await _auto_download_and_send(bot_instance, uid, url, u.message.chat_id, c)
@@ -45,25 +48,25 @@ async def on_group_msg(bot_instance, u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await bot_instance._is_group_allowed(chat_id, c):
         return
     
-    if uid not in bot_instance.cookies:
-        loaded = await bot_instance._ensure_cookies_loaded(uid, c)
-        if not loaded:
-            return
-    
     url = extract_url(u.message.text)
     if not url:
         return
     
-    message_id = u.message.message_id
-    
+    # Check cache first
     cached = bot_instance.file_id_cache.get(url)
     if cached and cached.get('file_ids'):
-        await resend_by_file_ids(chat_id, c, cached, reply_to_message_id=message_id)
+        await resend_by_file_ids(chat_id, c, cached, reply_to_message_id=u.message.message_id)
         return
+    
+    # Need cookies for new downloads
+    if uid not in bot_instance.cookies:
+        loaded = await bot_instance._ensure_cookies_loaded(uid, c)
+        if not loaded:
+            return  # Silent in groups
     
     status = await u.message.reply_text("⏳ Downloading...")
     try:
-        await _auto_download_and_send(bot_instance, uid, url, chat_id, c, reply_to_message_id=message_id)
+        await _auto_download_and_send(bot_instance, uid, url, chat_id, c, reply_to_message_id=u.message.message_id)
     finally:
         await status.delete()
 

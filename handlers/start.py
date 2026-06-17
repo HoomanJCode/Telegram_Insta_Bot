@@ -1,5 +1,7 @@
+# handlers/start.py
 import asyncio
 import logging
+from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -7,9 +9,6 @@ from telegram.constants import ParseMode
 from utils.helpers import check_whitelist, check_admin, get_cookie_status_text
 from utils.telegram_sender import resend_by_file_ids, send_media_batch
 from core.downloader import download_media
-from core.cache import FileIDCache
-from pathlib import Path
-import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +80,8 @@ async def start_cmd(bot_instance, u: Update, c: ContextTypes.DEFAULT_TYPE):
                     return
                 
                 elif status in ('pending', 'downloading'):
-                    elapsed = int(asyncio.get_event_loop().time() - pending.get('started_at', asyncio.get_event_loop().time()))
+                    import time
+                    elapsed = int(time.time() - pending.get('started_at', time.time()))
                     await u.message.reply_text(
                         f"⏳ Download in progress ({elapsed}s)...\n"
                         f"Tap the link again to check.",
@@ -106,9 +106,7 @@ async def start_cmd(bot_instance, u: Update, c: ContextTypes.DEFAULT_TYPE):
             await bot_instance._ask_cookies(u, c)
             return
     
-    if not check_whitelist(uid, bot_instance.config):
-        return
-    
+    # Everyone can see the start message
     await _show_start(bot_instance, u, c, edit=False)
 
 async def _show_start(bot_instance, update, context, edit=False):

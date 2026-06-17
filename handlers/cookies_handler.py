@@ -1,3 +1,4 @@
+# handlers/cookies_handler.py
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
@@ -12,6 +13,7 @@ WAITING_FOR_COOKIES = 1
 
 async def ask_cookies(bot_instance, u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not check_whitelist(u.effective_user.id, bot_instance.config):
+        await (u.callback_query.message if u.callback_query else u.message).reply_text("❌ Not authorized.")
         return ConversationHandler.END
     msg = u.callback_query.message if u.callback_query else u.message
     await msg.reply_text(
