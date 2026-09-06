@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: instagram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist data and downloads between restarts
+      - ./data:/app/data
+      - ./downloads:/app/downloads
