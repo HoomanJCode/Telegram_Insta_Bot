@@ -129,13 +129,12 @@ jobs:
         if: steps.check.outputs.has_secrets == 'true'
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -p 22 -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
       - name: 🚀 Deploy via Docker
         if: steps.check.outputs.has_secrets == 'true'
         env:
           TAG: ${{ github.ref_name }}
-          VPS_USER: ${{ secrets.VPS_USER }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WHITELIST_USERS: ${{ secrets.WHITELIST_USERS || '' }}
@@ -216,5 +215,5 @@ jobs:
           echo "✅ Deployment Complete!"
           SCRIPTEOF
 
-          scp /tmp/deploy.sh ${VPS_USER}@${VPS_HOST}:/tmp/deploy.sh
-          ssh ${VPS_USER}@${VPS_HOST} "bash /tmp/deploy.sh"
+          scp -P 22 /tmp/deploy.sh root@${VPS_HOST}:/tmp/deploy.sh
+          ssh -p 22 root@${VPS_HOST} "bash /tmp/deploy.sh"
