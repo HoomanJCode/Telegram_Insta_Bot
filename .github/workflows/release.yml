@@ -106,21 +106,33 @@ jobs:
     runs-on: ubuntu-latest
     name: 🚀 Deploy to VPS
     needs: docker
-    if: ${{ secrets.VPS_HOST != '' }}
     environment: production
 
     steps:
+      - name: 🔑 Check secrets
+        id: check
+        run: |
+          if [ -n "${{ secrets.VPS_HOST }}" ]; then
+            echo "has_secrets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ No VPS secrets found, skipping deployment"
+          fi
+
       - name: 🔑 Setup SSH
+        if: steps.check.outputs.has_secrets == 'true'
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
 
       - name: 🔗 Add host key
+        if: steps.check.outputs.has_secrets == 'true'
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
       - name: 🚀 Deploy via Docker
+        if: steps.check.outputs.has_secrets == 'true'
         env:
           TAG: ${{ github.ref_name }}
           VPS_USER: ${{ secrets.VPS_USER }}
