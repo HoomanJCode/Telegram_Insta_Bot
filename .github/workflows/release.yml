@@ -54,7 +54,7 @@ jobs:
           python -c "from core.downloader import check_gallery_dl; print('✅ downloader')"
           python -c "from handlers.start import start_cmd; print('✅ handlers')"
           python -c "from utils.helpers import check_admin, check_whitelist; print('✅ utils')"
-          python -c "from utils.telegram_sender import send_message; print('✅ telegram_sender')"
+          python -c "from utils.telegram_sender import send_media_batch, resend_by_file_ids; print('✅ telegram_sender')"
 
   # ──────────────────────────────────────────────
   # 2. Build and push Docker image to GHCR
