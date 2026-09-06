@@ -204,13 +204,14 @@ jobs:
           docker image prune -f
 
           # Verify
-          sleep 5
-          if docker compose ps | grep -q "running"; then
+          sleep 10
+          if docker inspect --format='{{.State.Status}}' ${CONTAINER} 2>/dev/null | grep -q "running"; then
             echo "✅ Container is running!"
-            docker compose ps
+            docker inspect --format='{{.State.Status}}' ${CONTAINER}
+            docker logs --tail=10 ${CONTAINER}
           else
             echo "❌ Container failed to start!"
-            docker compose logs --tail=20
+            docker logs --tail=30 ${CONTAINER}
             exit 1
           fi
 
