@@ -39,6 +39,58 @@ This Telegram bot downloads Instagram content (posts, reels, stories, profile pi
 
 ---
 
+## 🐳 Docker Deployment (Recommended)
+
+Using Docker is the easiest way to run the bot on a server — no need to install Python or dependencies manually.
+
+### Quick Start (build locally)
+```bash
+# 1. Clone the repo
+git clone https://github.com/HoomanJCode/Telegram_Insta_Bot.git
+cd Telegram_Insta_Bot
+
+# 2. Create your .env file
+cp .env.example .env
+nano .env   # Edit with your BOT_TOKEN etc.
+
+# 3. Build and run
+docker compose up -d
+```
+
+### Quick Start (use pre-built image)
+```bash
+# 1. Pull the latest image
+docker pull ghcr.io/hoomanjcode/telegram_insta_bot:latest
+
+# 2. Create your .env file
+mkdir -p instagram-bot && cd instagram-bot
+cat > .env << EOF
+BOT_TOKEN=your_bot_token_here
+WHITELIST_USERS=123456789,987654321
+STORAGE_DAYS=2
+MAX_TELEGRAM_FILE_SIZE=50
+EOF
+
+# 3. Run
+docker compose up -d
+```
+
+### Useful Commands
+```bash
+docker compose up -d        # Start in background
+docker compose down         # Stop the bot
+docker compose logs -f      # Watch live logs
+docker compose restart      # Restart the bot
+docker compose pull         # Pull latest pre-built image
+docker compose build        # Rebuild from source (local build)
+```
+
+### What You Need on Your Server
+- [Docker](https://docs.docker.com/engine/install/) installed
+- [Docker Compose](https://docs.docker.com/compose/install/) (usually included with Docker)
+
+---
+
 ## 📋 Prerequisites
 
 ### System Requirements
@@ -135,16 +187,29 @@ Telegram_Insta_Bot/
 ├── bot.py                  # Main bot application
 ├── config.py               # Configuration handler
 ├── requirements.txt        # Python dependencies
+├── Dockerfile              # Docker image build
+├── docker-compose.yml      # Docker Compose config
 ├── .env                    # Environment variables
-├── README.md              # Documentation
+├── README.md               # Documentation
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml     # CI/CD deployment
-├── data/
-│   ├── cookies/           # Per-user cookie files
-│   ├── user_cookies.json  # Cookie paths
-│   └── download_cache.json # Download cache
-└── downloads/             # Downloaded files (auto-cleaned)
+│       ├── ci.yml          # Tests (on push/PR)
+│       └── release.yml     # Build image + Release + Deploy (on tag)
+├── core/
+│   ├── downloader.py       # gallery-dl integration
+│   ├── cache.py            # Download cache
+│   └── cookies.py          # Cookie management
+├── handlers/
+│   ├── start.py            # /start command
+│   ├── messages.py         # Message handling
+│   ├── inline.py           # Inline mode
+│   ├── callbacks.py        # Callback queries
+│   └── cookies_handler.py  # Cookie upload flow
+├── utils/
+│   ├── helpers.py          # Utility functions
+│   └── telegram_sender.py  # Message sending
+├── data/                   # Runtime data (gitignored)
+└── downloads/              # Downloaded files (gitignored)
 ```
 
 ---
@@ -181,6 +246,38 @@ pip install gallery-dl
 - Telegram limits media groups to 10 items
 - Bot automatically splits larger posts into batches
 - Individual images sent as fallback if batch fails
+
+---
+
+## 🔄 CI/CD Pipeline
+
+### Tests (on every push/PR)
+- Python syntax validation
+- Import checks for all modules
+
+### Release (on tag push `v*`)
+1. **Build Docker image** → pushed to [GitHub Container Registry](https://github.com/HoomanJCode/Telegram_Insta_Bot/pkgs/container/telegram_insta_bot) (public)
+2. **GitHub Release** → created with changelog and pull commands
+3. **Deploy to VPS** → auto-deploys via Docker (if secrets configured)
+
+### How to release
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+The pipeline will build, release, and deploy automatically.
+
+### VPS Secrets (optional)
+Set these in **Settings → Secrets and variables → Actions** to enable auto-deploy:
+
+| Secret | Description |
+|--------|-------------|
+| `VPS_HOST` | Server IP address |
+| `VPS_USER` | SSH username (e.g. `root`) |
+| `VPS_SSH_PRIVATE_KEY` | SSH private key |
+| `BOT_TOKEN` | Telegram bot token |
+| `WHITELIST_USERS` | Comma-separated user IDs |
+| `ADMIN_USERS` | Comma-separated admin IDs |
 
 ---
 
