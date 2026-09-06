@@ -1,25 +1,34 @@
-FROM python:3.11-slim
+# ── Build stage ──────────────────────────────────
+FROM python:3.11-slim AS builder
 
-# Install system dependencies needed by gallery-dl
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         gcc \
-        libffi-dev \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+        libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ── Final stage (no gcc, no build tools) ─────────
+FROM python:3.11-slim
+
 WORKDIR /app
 
-# Copy requirements first (layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only installed packages from builder
+COPY --from=builder /install /usr/local
 
 # Copy application code
-COPY . .
+COPY bot.py config.py ./
+COPY core/ ./core/
+COPY handlers/ ./handlers/
+COPY utils/ ./utils/
 
 # Create data directories
 RUN mkdir -p data downloads
 
-# Run the bot
+# Remove pip to save space
+RUN pip uninstall -y pip setuptools wheel 2>/dev/null; true
+
 CMD ["python", "bot.py"]

@@ -4,14 +4,15 @@
 venv
 env
 .env
+.env.example
 __pycache__
 *.pyc
 *.pyo
 data/
 downloads/
 *.log
-*.txt
-!requirements.txt
 deploy.sh
 .DS_Store
 Thumbs.db
+*.md
+!requirements.txt
