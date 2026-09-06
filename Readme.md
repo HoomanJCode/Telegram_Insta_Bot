@@ -268,16 +268,26 @@ git push origin v0.1.0
 The pipeline will build, release, and deploy automatically.
 
 ### VPS Secrets (optional)
-Set these in **Settings → Secrets and variables → Actions** to enable auto-deploy:
 
-| Secret | Description |
-|--------|-------------|
-| `VPS_HOST` | Server IP address |
-| `VPS_USER` | SSH username (e.g. `root`) |
-| `VPS_SSH_PRIVATE_KEY` | SSH private key |
+**Step 1: Generate SSH key on your VPS**
+```bash
+ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/github_deploy_key -N ""
+cat ~/.ssh/github_deploy_key.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**Step 2: Add secrets in GitHub**
+Go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Value |
+|--------|-------|
+| `VPS_HOST` | Your server IP |
+| `VPS_SSH_PRIVATE_KEY` | Output of `cat ~/.ssh/github_deploy_key` (the **private** key) |
 | `BOT_TOKEN` | Telegram bot token |
-| `WHITELIST_USERS` | Comma-separated user IDs |
-| `ADMIN_USERS` | Comma-separated admin IDs |
+| `WHITELIST_USERS` | Comma-separated user IDs (optional) |
+| `ADMIN_USERS` | Comma-separated admin IDs (optional) |
+
+> ⚠️ The `VPS_SSH_PRIVATE_KEY` must be the **private** key, not the public key. Include the full `-----BEGIN...` and `-----END...` lines.
 
 ---
 
