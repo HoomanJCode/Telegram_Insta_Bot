@@ -1,41 +1,73 @@
-# Instagram Downloader Telegram Bot
+# 📸 Telegram Instagram Downloader Bot
 
-> **⚠️ DISCLAIMER: EDUCATIONAL PROJECT**
-> 
-> This project is created for **educational purposes only**. It demonstrates Python programming concepts, Telegram Bot API integration, and web scraping techniques.
-> 
-> - This bot is **NOT intended for production use** or actual content downloading
-> - Downloading Instagram content may violate Instagram's Terms of Service
-> - Respect content creators' rights and intellectual property
-> - Users are solely responsible for complying with applicable laws and regulations
-> - The developers assume **NO liability** for any misuse of this software
-> - This project was built as a coding exercise using **Vibe Coding** methodology with DeepSeek AI assistance
+> **Download Instagram reels, posts, stories, and profile pictures directly to Telegram.** This self-hosted Python bot takes any Instagram link you send and automatically downloads the media with gallery-dl, then delivers it to your chat — no manual saving, no external apps.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
+[![CI](https://img.shields.io/github/actions/workflow/status/HoomanJCode/Telegram_Insta_Bot/ci.yml?branch=master&label=CI)](https://github.com/HoomanJCode/Telegram_Insta_Bot/actions)
+[![Docker](https://img.shields.io/badge/Docker-GHCR-blue.svg)](https://github.com/HoomanJCode/Telegram_Insta_Bot/pkgs/container/telegram_insta_bot)
+
+<details>
+<summary><b>⚠️ Disclaimer — educational project</b></summary>
+
+This project is created for **educational purposes only**. It demonstrates Python programming concepts, Telegram Bot API integration, and web scraping techniques.
+
+- This bot is **NOT intended for production use** or actual content downloading
+- Downloading Instagram content may violate Instagram's Terms of Service
+- Respect content creators' rights and intellectual property
+- Users are solely responsible for complying with applicable laws and regulations
+- The developers assume **NO liability** for any misuse of this software
+- This project was built as a coding exercise using **Vibe Coding** methodology with DeepSeek AI assistance
+
+</details>
 
 ---
 
-## 📚 About This Project
+## 📚 Table of Contents
 
-This Telegram bot downloads Instagram content (posts, reels, stories, profile pictures) and delivers them directly to Telegram. It demonstrates integration of Telegram Bot API, gallery-dl, async I/O, batch media uploading, and persistent caching in a single Python application.
-
-**Development Methodology:** Created using **Vibe Coding** - AI-assisted development through natural language interaction with DeepSeek AI.
+- [Features](#-features)
+- [Supported Content](#-supported-content)
+- [Docker Deployment](#-docker-deployment-recommended)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+- [Configuration](#-configuration)
+- [Usage](#-usage)
+- [Project Structure](#-project-structure)
+- [Troubleshooting](#-troubleshooting)
+- [CI/CD Pipeline](#-cicd-pipeline)
+- [Security Notes](#-security-notes)
+- [License](#-license)
 
 ---
 
-## 🚀 Features
+## ✨ Features
 
-- 🖼️ **Post Download** - All images from carousel posts as media groups
-- 🎬 **Reel Download** - Instagram Reels as MP4 video
-- 📖 **Story Download** - Story images and videos (before 24h expiry)
-- 👤 **Profile Pictures** - Download profile pictures
-- ⚡ **Auto-Download** - Just send a link, bot handles everything
-- 📦 **Batch Image Upload** - Multiple images sent as Telegram media groups (up to 10 per batch)
-- 💾 **Smart Caching** - Prevents re-downloading same content
-- 🔒 **Concurrent Protection** - Download locks prevent duplicate downloads
-- 🗑️ **Auto-Cleanup** - Files deleted after configurable days (default: 2)
-- 🍪 **Cookie Management** - Per-user cookie storage with validation
-- 👥 **Whitelist System** - Restrict bot to specific users
-- 📱 **Download History** - View and resend previously downloaded content
-- 🔄 **Resend Support** - Resend cached media without re-downloading
+- 🖼️ **Post Download** — all images from Instagram carousel posts, sent as media groups
+- 🎬 **Reel Download** — Instagram Reels downloaded as MP4 video
+- 📖 **Story Download** — Instagram stories (images and videos, before 24h expiry)
+- 👤 **Profile Pictures** — download any public profile picture
+- ⚡ **Auto-Download** — just send a link, the bot handles everything
+- 📦 **Batch Image Upload** — multiple images sent as Telegram media groups (up to 10 per batch)
+- 💾 **Smart Caching** — prevents re-downloading the same content
+- 🔒 **Concurrent Protection** — download locks prevent duplicate downloads
+- 🗑️ **Auto-Cleanup** — files deleted after configurable days (default: 2)
+- 🍪 **Cookie Management** — per-user cookie storage with validation for private content
+- 👥 **Whitelist System** — restrict the bot to specific Telegram users
+- 📱 **Download History** — view and resend previously downloaded content
+- 🔄 **Resend Support** — resend cached media without re-downloading
+
+---
+
+## 📥 Supported Content
+
+Paste any of these Instagram URLs into the chat:
+
+| Type | URL format | What you get |
+|------|------------|--------------|
+| 📷 **Posts** | `instagram.com/p/CODE/` | All images & videos from the post |
+| 🎬 **Reels** | `instagram.com/reel/CODE/` | MP4 video download |
+| 📖 **Stories** | `instagram.com/stories/USERNAME/` | Story images and videos |
+| 👤 **Profiles** | `instagram.com/USERNAME/` | Profile picture download |
 
 ---
 
@@ -44,6 +76,7 @@ This Telegram bot downloads Instagram content (posts, reels, stories, profile pi
 Using Docker is the easiest way to run the bot on a server — no need to install Python or dependencies manually.
 
 ### Quick Start (build locally)
+
 ```bash
 # 1. Clone the repo
 git clone https://github.com/HoomanJCode/Telegram_Insta_Bot.git
@@ -58,6 +91,7 @@ docker compose up -d
 ```
 
 ### Quick Start (use pre-built image)
+
 ```bash
 # 1. Pull the latest image
 docker pull ghcr.io/hoomanjcode/telegram_insta_bot:latest
@@ -76,6 +110,7 @@ docker compose up -d
 ```
 
 ### Useful Commands
+
 ```bash
 docker compose up -d        # Start in background
 docker compose down         # Stop the bot
@@ -86,6 +121,7 @@ docker compose build        # Rebuild from source (local build)
 ```
 
 ### What You Need on Your Server
+
 - [Docker](https://docs.docker.com/engine/install/) installed
 - [Docker Compose](https://docs.docker.com/compose/install/) (usually included with Docker)
 
@@ -94,19 +130,22 @@ docker compose build        # Rebuild from source (local build)
 ## 📋 Prerequisites
 
 ### System Requirements
-- Python 3.8+
+
+- **Python 3.9+**
 - Linux (recommended) / macOS / Windows
 - gallery-dl (auto-installed if missing)
 - Telegram Bot Token from [@BotFather](https://t.me/BotFather)
 
 ### No FFmpeg Required
-Unlike the YouTube bot, FFmpeg is not required for Instagram downloads. gallery-dl handles all media types natively.
+
+Unlike YouTube downloader bots, **FFmpeg is not required** for Instagram downloads. gallery-dl handles all media types natively.
 
 ---
 
 ## 📦 Installation
 
 ### Step 1: Clone and Setup
+
 ```bash
 git clone https://github.com/HoomanJCode/Telegram_Insta_Bot.git
 cd Telegram_Insta_Bot
@@ -115,11 +154,15 @@ source venv/bin/activate
 ```
 
 ### Step 2: Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
+
 ### Step 3: Configure Environment
-Create `.env` file:
+
+Create a `.env` file:
+
 ```env
 BOT_TOKEN=your_bot_token_here
 WHITELIST_USERS=123456789,987654321
@@ -128,11 +171,13 @@ MAX_TELEGRAM_FILE_SIZE=50
 ```
 
 ### Step 4: Create Required Directories
+
 ```bash
 mkdir -p data/cookies downloads
 ```
 
 ### Step 5: Run
+
 ```bash
 python bot.py
 ```
@@ -143,19 +188,21 @@ python bot.py
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BOT_TOKEN` | Telegram Bot API token | Required |
-| `WHITELIST_USERS` | Comma-separated authorized user IDs | Empty (all allowed) |
-| `STORAGE_DAYS` | Days before files auto-delete | 2 |
-| `MAX_TELEGRAM_FILE_SIZE` | Max size for Telegram upload (MB) | 50 |
+| `BOT_TOKEN` | Telegram Bot API token (from @BotFather) | **Required** |
+| `WHITELIST_USERS` | Comma-separated Telegram user IDs allowed to use the bot | Empty (all allowed) |
+| `ADMIN_USERS` | Comma-separated admin user IDs | Empty |
+| `STORAGE_DAYS` | Days before downloaded files auto-delete | `2` |
+| `MAX_TELEGRAM_FILE_SIZE` | Max size for Telegram upload (MB) | `50` |
 
 ---
 
 ## 📱 Usage
 
 ### Basic Flow
-1. **Upload Cookies** - `/cookies` - Required first step
-2. **Send Instagram Link** - Just paste any Instagram URL
-3. **Auto-Download** - Bot automatically downloads and sends all media
+
+1. **Upload Cookies** — send `/cookies`, then upload your Instagram cookies file (required first step)
+2. **Send Instagram Link** — just paste any Instagram URL
+3. **Auto-Download** — the bot automatically downloads and sends all media
 
 ### Commands
 
@@ -166,17 +213,12 @@ python bot.py
 | `/recent` | View download history with resend option |
 | `/help` | Help and usage information |
 
-### Supported Link Types
-- **📷 Posts** - `instagram.com/p/CODE/` - All images/videos from post
-- **🎬 Reels** - `instagram.com/reel/CODE/` - Video download
-- **📖 Stories** - `instagram.com/stories/USERNAME/` - Story content
-- **👤 Profiles** - `instagram.com/USERNAME/` - Profile picture
-
 ### Cookie Setup
+
 1. Login to Instagram in your browser
-2. Install "Get cookies.txt LOCALLY" browser extension
+2. Install the "Get cookies.txt LOCALLY" browser extension
 3. Click **Export** (not Export As JSON)
-4. Send the `.txt` file to bot via `/cookies`
+4. Send the `.txt` file to the bot via `/cookies`
 
 ---
 
@@ -217,59 +259,70 @@ Telegram_Insta_Bot/
 ## 🔧 Troubleshooting
 
 ### "gallery-dl not found" error
+
 ```bash
 # Install manually
 pip install gallery-dl
-# Bot auto-installs on startup if missing
+# The bot also auto-installs it on startup if missing
 ```
 
 ### "Private account" errors
+
 - The account used for cookies must follow the private account
 - Re-login to Instagram and export fresh cookies
 
 ### "Story expired" errors
+
 - Instagram stories expire after 24 hours
 - Download stories soon after they're posted
 
 ### Rate limiting issues
+
 - Instagram aggressively rate limits requests
 - Wait a few minutes between downloads
 - Use fresh cookies if rate limited frequently
 
 ### Cookies not working
+
 - Ensure you clicked **Export** (not Export As JSON)
 - Cookie file should be in Netscape format
 - Re-login to Instagram and export fresh cookies
 - Check that `sessionid` and `ds_user_id` are present
 
 ### Media group sending fails
+
 - Telegram limits media groups to 10 items
-- Bot automatically splits larger posts into batches
-- Individual images sent as fallback if batch fails
+- The bot automatically splits larger posts into batches
+- Individual images are sent as a fallback if the batch fails
 
 ---
 
 ## 🔄 CI/CD Pipeline
 
 ### Tests (on every push/PR)
+
 - Python syntax validation
 - Import checks for all modules
 
 ### Release (on tag push `v*`)
+
 1. **Build Docker image** → pushed to [GitHub Container Registry](https://github.com/HoomanJCode/Telegram_Insta_Bot/pkgs/container/telegram_insta_bot) (public)
 2. **GitHub Release** → created with changelog and pull commands
 3. **Deploy to VPS** → auto-deploys via Docker (if secrets configured)
 
 ### How to release
+
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
 The pipeline will build, release, and deploy automatically.
 
 ### VPS Secrets (optional)
 
 **Step 1: Generate SSH key on your VPS**
+
 ```bash
 ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/github_deploy_key -N ""
 cat ~/.ssh/github_deploy_key.pub >> ~/.ssh/authorized_keys
@@ -277,6 +330,7 @@ chmod 600 ~/.ssh/authorized_keys
 ```
 
 **Step 2: Add secrets in GitHub**
+
 Go to **Settings → Secrets and variables → Actions** and add:
 
 | Secret | Value |
@@ -304,9 +358,8 @@ Go to **Settings → Secrets and variables → Actions** and add:
 
 ## 📄 License
 
-Educational project. Code can be used for learning purposes. Not intended for production deployment. Respect all applicable laws and terms of service.
+This project is licensed under the [MIT License](LICENSE) — free to use, modify, and distribute with attribution. It was built for learning purposes; respect all applicable laws and terms of service.
 
 ---
 
-**Built with ❤️ using Vibe Coding & DeepSeek AI**  
-*For educational purposes only*
+**Built with ❤️ using Vibe Coding & DeepSeek AI** · *Educational project*
