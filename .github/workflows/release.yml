@@ -10,11 +10,59 @@ env:
 
 jobs:
   # ──────────────────────────────────────────────
-  # 1. Build and push Docker image to GHCR
+  # 1. Run tests
+  # ──────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    name: 🧪 Test
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: 📦 Install dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: 🔍 Syntax check
+        run: |
+          echo "Checking all Python files for syntax errors..."
+          FAILED=0
+          for f in $(find . -name "*.py" -not -path "./.git/*" -not -path "./venv/*"); do
+            if python -m py_compile "$f"; then
+              echo "✅ $f"
+            else
+              echo "❌ $f"
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -eq 1 ]; then
+            echo "❌ Syntax errors found!"
+            exit 1
+          fi
+
+      - name: 🧪 Import check
+        run: |
+          python -c "from config import Config; print('✅ config')"
+          python -c "from core.cache import FileIDCache; print('✅ cache')"
+          python -c "from core.cookies import load_cookie_ids, save_cookie_ids; print('✅ cookies')"
+          python -c "from core.downloader import check_gallery_dl; print('✅ downloader')"
+          python -c "from handlers.start import start_cmd; print('✅ handlers')"
+          python -c "from utils.helpers import check_admin, check_whitelist; print('✅ utils')"
+          python -c "from utils.telegram_sender import send_message; print('✅ telegram_sender')"
+
+  # ──────────────────────────────────────────────
+  # 2. Build and push Docker image to GHCR
   # ──────────────────────────────────────────────
   docker:
     runs-on: ubuntu-latest
     name: 🐳 Build Docker Image
+    needs: test
     permissions:
       contents: read
       packages: write
@@ -52,7 +100,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   # ──────────────────────────────────────────────
-  # 2. Create GitHub Release with changelog
+  # 3. Create GitHub Release with changelog
   # ──────────────────────────────────────────────
   release:
     runs-on: ubuntu-latest
@@ -102,7 +150,7 @@ jobs:
           prerelease: false
 
   # ──────────────────────────────────────────────
-  # 3. Deploy to VPS (only if secrets exist)
+  # 4. Deploy to VPS (only if secrets exist)
   # ──────────────────────────────────────────────
   deploy:
     runs-on: ubuntu-latest
