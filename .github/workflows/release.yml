@@ -7,7 +7,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   # ──────────────────────────────────────────────
@@ -31,14 +30,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 🏷️ Lowercase image name
+        id: image
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: 🏷️ Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ github.ref_name }}
             type=raw,value=latest
 
       - name: 🏗️ Build and push
@@ -84,7 +86,7 @@ jobs:
               echo "## Docker"
               echo ""
               echo "\`\`\`bash"
-              echo "docker pull ghcr.io/${{ github.repository }}:${TAG#v}"
+              echo "docker pull ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):${TAG}"
               echo "\`\`\`"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
@@ -143,7 +145,7 @@ jobs:
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
         run: |
           DEPLOY_DIR="/opt/instagram-bot"
-          IMAGE="ghcr.io/${{ github.repository }}:${TAG#v}"
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):${TAG}"
           CONTAINER="instagram-bot"
 
           cat > /tmp/deploy.sh << SCRIPTEOF
