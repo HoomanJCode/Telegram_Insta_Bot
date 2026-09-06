@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: 🧪 Test
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔍 Syntax check
+        run: |
+          echo "Checking all Python files for syntax errors..."
+          find . -name "*.py" -not -path "./.git/*" -not -path "./venv/*" | while read f; do
+            python -m py_compile "$f" && echo "✅ $f" || echo "❌ $f"
+          done
+
+      - name: 🧪 Import check
+        run: |
+          python -c "from config import Config; print('✅ config OK')"
+          python -c "from core.cache import FileIDCache; print('✅ cache OK')"
+          python -c "from core.cookies import load_cookie_ids, save_cookie_ids; print('✅ cookies OK')"
+          python -c "from core.downloader import check_gallery_dl; print('✅ downloader OK')"
+          python -c "from handlers.start import start_cmd; print('✅ handlers OK')"
+          python -c "from utils.helpers import check_admin, check_whitelist; print('✅ utils OK')"
+          python -c "from utils.telegram_sender import send_message; print('✅ telegram_sender OK')"
